@@ -178,6 +178,7 @@ void setup()
   // Start up the ds18b20 library
   sensors.begin();
   sensors.setResolution(10);
+  delay(1000);
   // if (!sensors.getAddress(insideThermometer, 0)) Serial.println("Unable to find address for Device 0");
 
   // sensors.setResolution(insideThermometer, 9);
@@ -245,9 +246,7 @@ void loop()
   
   LowPower.begin();
   delay(100);
-  // set PA6 to analog to reduce power due to currect flow on DIO to BME280
-  // done @ lora.sleepLowPower due to lower power during RX1/RX2 window
-  // pinMode(PA6, INPUT_ANALOG);
+
 
   LowPower.deepSleep(SLEEP_INTERVAL_US);
   
