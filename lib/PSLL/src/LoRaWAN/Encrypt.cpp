@@ -189,11 +189,13 @@ void Construct_Data_MIC(sBuffer *Buffer, sLoRa_Session *Session_Data, sLoRa_Mess
 	Block_B[8] = Message->DevAddr[1];
 	Block_B[9] = Message->DevAddr[0];
 
-	Block_B[10] = (Message->Frame_Counter & 0x00FF);
-	Block_B[11] = ((Message->Frame_Counter >> 8) & 0x00FF);
+	Block_B[10] = (Message->Frame_Counter & 0x000000FF);
+	Block_B[11] = ((Message->Frame_Counter >> 8) & 0x000000FF);
 
-	Block_B[12] = 0x00; //Frame counter upper bytes
-	Block_B[13] = 0x00;
+	// changed for 32 bits MIC encryption
+	// Frame counter upper bytes
+	Block_B[12] = ((Message->Frame_Counter >> 16) & 0x000000FF);
+	Block_B[13] = ((Message->Frame_Counter >> 24) & 0x000000FF);
 
 	Block_B[14] = 0x00;
 	Block_B[15] = Buffer->Counter;

@@ -15,16 +15,19 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ******************************************************************************************/
 /****************************************************************************************
+* Original information:
 * File:     RFM95.cpp
 * Author:   Gerben den Hartog
 * Compagny: Ideetron B.V.
 * Website:  http://www.ideetron.nl/LoRa
 * E-mail:   info@ideetron.nl
-****************************************************************************************/
-/****************************************************************************************
 * Created on:         06-01-2017
 * Supported Hardware: ID150119-02 Nexus board with RFM95
 ****************************************************************************************/
+/***************************************************************************************
+ * Modified by Leo Korbee for Low power usage on STM32L051 with RFM95
+ ***************************************************************************************/ 
+
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -507,8 +510,9 @@ bool RFM_Init()
   RFM_Change_Datarate(0x00);
 
   //Rx Timeout set to 37 symbols
-  RFM_Write(RFM_REG_SYM_TIMEOUT_LSB, 0x25);
-  //RFM_Write(RFM_REG_SYM_TIMEOUT_LSB, 0x05);
+  //RFM_Write(RFM_REG_SYM_TIMEOUT_LSB, 0x25);
+  // for longer timeout on join reception
+  RFM_Write(RFM_REG_SYM_TIMEOUT_LSB, 0x40);
 
   //Preamble length set to 8 symbols
   //0x0008 + 4 = 12
@@ -625,7 +629,6 @@ void RFM_Send_Package(sBuffer *RFM_Tx_Package, sSettings *LoRa_Settings)
 
   //Switch DIO0 to TxDone
   RFM_Write(RFM_REG_DIO_MAPPING1, 0x40);
-
   
   //Set IQ to normal values
   RFM_Write(RFM_REG_INVERT_IQ,0x27);
@@ -691,12 +694,16 @@ message_t RFM_Single_Receive(sSettings *LoRa_Settings)
 
   //Wait until RxDone or Timeout
   //Wait until timeout or RxDone interrupt
-  while((digitalRead(RFM_pins.DIO0) == LOW) && (digitalRead(RFM_pins.DIO1) == LOW));
+  while((digitalRead(RFM_pins.DIO0) == LOW) && (digitalRead(RFM_pins.DIO1) == LOW))
+  {
+     // DEBUG_PRINT(".");
+  }
+  DEBUG_PRINTLN("\nRFM95 Wait RxDone int or Timeout");
 
   //Check for Timeout
   if(digitalRead(RFM_pins.DIO1) == HIGH)
   {
-    //Clear interrupt register
+    // Clear interrupt register
     RFM_Write(RFM_REG_IRQ_FLAGS,0xE0);
     Message_Status = TIMEOUT;
   }
@@ -844,6 +851,11 @@ void RFM_Write(unsigned char RFM_Address, unsigned char RFM_Data)
 */
 void RFM_Switch_Mode(unsigned char Mode)
 {
+    // wake up action, first startup SPI, due to sleeping 
+    if (Mode == RFM_MODE_STANDBY)
+    {
+      SPI.begin();
+    }
     Mode = Mode | 0x80; //Set high bit for LoRa mode
 
     //Switch mode on RFM module
@@ -851,22 +863,15 @@ void RFM_Switch_Mode(unsigned char Mode)
 }
 
 /*
-  Switch RFM device to sleep mode and low power setting for some pins
+  Switch RFM device to sleep mode and SPI end for power reduction
 */
 void RFM_Mode_Sleep_LowPower()
 {
   RFM_Write(RFM_REG_OP_MODE, RFM_MODE_SLEEP);
-  // reduction of this time wil have the effect of not reducing to minimal power
-  // This should be at least 25ms (as shown in experiments, after RX2 the current will go up to 80uA)
-  delay(25);
-  // set pinmode to output to -> reduces from 166uA -> 84uA
-  //pinMode(RFM_pins.CS, OUTPUT);
-  digitalWrite(RFM_pins.CS, HIGH);
-  // MOSI pin to high -> reduces from 84uA to 1,7 uA! (Serial off!)
-  pinMode(RFM_pins.MOSI, OUTPUT);
-  digitalWrite(PA7, HIGH);
-  // set PA6 to analog to reduce power due to currect flow on DIO to BME280
-  pinMode(PA6, INPUT_ANALOG);
+  // MOSI pin to high on SPI -> reduces from 84uA to 1,7 uA! (Serial off!)
+  SPI.end();
+
+  // DO Not forget to enable SPI after this is called, done in RFM_Switch_Mode(RFM_MODE_STANDBY)
 }
 
 
@@ -877,5 +882,5 @@ void RFM_Mode_Sleep_LowPower()
 */
 unsigned char RFM_Get_Rssi()
 {
-  return RFM_Read(RFM_REG_LAST_RSSI);
+  return RFM_Read(RFM_REG_RSSI);
 }

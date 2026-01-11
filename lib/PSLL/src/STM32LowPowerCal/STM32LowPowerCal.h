@@ -2,8 +2,6 @@
 @author Leo Korbee
 @file   STM32LowPowerCal.h
 @brief  Correction for usign LowPower in sleep modes with no crystal
-
-
 */
 
 #include "STM32LowPower.h"
@@ -14,20 +12,17 @@
 class STM32LowPowerCal : public STM32LowPower {
 
     public:
-        void deepSleep(uint32_t ms, int correction_Time);
-        void deepSleep(int ms, int correction_Time)
+        void deepSleep(uint32_t ms, int substraction_Time);
+        void deepSleep(int ms, int substraction_Time)
         {
-            deepSleep((uint32_t)ms, correction_Time);
+            deepSleep((uint32_t)ms, substraction_Time);
         }
        
-        void setRTCCalibrationTime(float calibration_Time);
-        void calibrateRTC();
-        float getRTCTimeCorrection();
+        float getTimeCorrectionFactor();
+        void setTimeCorrectionFactor(float time_Correction_Factor);
 
-    private:
          // declare timing parameters
-        float rtc_Time_Correction_Factor;
-        float rct_Calibration_Time; // time it should be.
+        float time_Correction_Factor;
 };
 
 extern STM32LowPowerCal LowPowerCal;
