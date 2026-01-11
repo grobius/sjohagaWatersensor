@@ -69,8 +69,8 @@ class LoRaWANClass
         void cycle(void);
 
         // frame counter
-        unsigned int getFrameCounter();
-        void setFrameCounter(unsigned int FrameCounter);
+        uint32_t getFrameCounter();
+        void setFrameCounter(uint32_t FrameCounter);
 
         // setters
         void setReceiveDelay1(unsigned char ReceiveDelay1);
@@ -91,7 +91,7 @@ class LoRaWANClass
         unsigned char Address_Tx[4];
         unsigned char NwkSKey[16];
         unsigned char AppSKey[16];
-        unsigned int Frame_Counter_Tx;
+        uint32_t Frame_Counter_Tx;
         sLoRa_Session Session_Data;
 
         // Declare OTAA data struct

@@ -1,44 +1,38 @@
 /**
- * Example and test of OTAA device connection
- * Author: Leo Korbee
- * 2022-10-23
- * Tested on MiniPill LoRa (STM32L051C8T6 with RFM95W)
- * See end of file for connection diagram
- * 
- * Adapted main code with some improvements:
- * - Added DEBUG possibilities
- * - Added security feature/file - do not upload this one to your git-repository!
- * 
- * Adapted library for some improvements:
- * - Added ADR return message for 0x06 Request
- * - Improved DevNonce calculation/randomization
- * - Mac command processing
- * - Confirmed downlink works!
- * - Low Power mode, also during Join and Cycle (send and receive RX1 or RX2)
- * - RTC timing correction for Low Power mode
- * 
- * 2023-05-14
- * - set calTime in secconfig.h and used for calibration.
- * - secconfig should be renamed?
- * 
- * 2023-10-17
- * - added class CLASS_A_NO_RX for devices that only sends data and do not use the 
- *   receive window to reduce power. Updated LoRaMAC.cpp
- * 
- * 2024-06-17
- * - changed secconfig to config.h
+ * Water sensor with DS18B20 temperature sensor
+ * Author: Johan Sjöhage
+ * Based on: Leo Korbee's PSLL library examples
+ *
+ * Using updated PSLL library v2.1 from https://gitlab.com/iot-lab-org/stm32_lora_psll
+ *
+ * Hardware: MiniPill LoRa (STM32L051C8T6 with RFM95W)
+ * Sensor: DS18B20 temperature sensor via OneWire
+ *
+ * Features:
+ * - Low power operation with CLASS_A mode
+ * - OTAA joining with automatic RTC calibration during join
+ * - Sends temperature + VCC readings
+ * - Configurable sleep interval via downlink
+ * - Deep sleep between transmissions
+ *
+ * Downlink Protocol (Port 1):
+ * Byte 0: Command
+ *   0x01 = Set sleep interval
+ * Byte 1-4: Sleep interval in seconds (uint32_t, big-endian)
+ *
+ * Example: 01 00 00 02 58 = Set sleep interval to 600 seconds (10 minutes)
  */
-//#include <Arduino.h>
 #include "lorawan.h"
 // include for security credentials
 #include "config.h"
-#include "STM32LowPowerCal.h"
 
 // include for internal voltage reference
 #include "STM32IntRef.h"
 
-// ds18b20 libraries
+// EEPROM emulation for STM32
+#include <EEPROM.h>
 
+// ds18b20 libraries
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
@@ -58,19 +52,29 @@ DeviceAddress insideThermometer;
 //#define DEBUG_MAIN
 
 // Define constants for magic numbers
-#define BAUD_RATE 9600
+#define BAUD_RATE 115200
 #define RETRY_DELAY_MS 15000
-#define SLEEP_INTERVAL_US 600000
+#define DEFAULT_SLEEP_INTERVAL_SECONDS 600  // 10 minutes default
 #define TEMP_OFFSET 50
 
+// EEPROM addresses for persistent storage
+#define EEPROM_MAGIC_ADDR 0
+#define EEPROM_SLEEP_INTERVAL_ADDR 4
+#define EEPROM_MAGIC_VALUE 0xA5B6C7D8  // Magic number to validate EEPROM data
+
+// Downlink command codes
+#define CMD_SET_SLEEP_INTERVAL 0x01
+
 #ifdef DEBUG_MAIN
-  // Correctly define Serial2 for STM32
-  HardwareSerial Serial2(PA2, PA3); // TX on PA2, RX on PA3
-  #define DEBUG_INIT() Serial2.begin(BAUD_RATE)
+  // for debugging redirect to hardware Serial2
+  // Tx on PA2 - connect your Rx to PA2 and baudrate 115200,8N1
+  #define DEBUG_INIT(...) HardwareSerial Serial2(USART2)
+  #define DEBUG_BEGIN(...) Serial2.begin(115200)
   #define DEBUG_PRINT(...) Serial2.print(__VA_ARGS__)
   #define DEBUG_PRINTLN(...) Serial2.println(__VA_ARGS__)
+  DEBUG_INIT();
 #else
-  #define DEBUG_INIT()
+  #define DEBUG_BEGIN(...)
   #define DEBUG_PRINT(...)
   #define DEBUG_PRINTLN(...)
 #endif
@@ -78,9 +82,8 @@ DeviceAddress insideThermometer;
 /* A BME280 object using SPI, chip select pin PA1 */
 //BME280 bme(SPI,PA1);
 
-// Sleep this many microseconds. Notice that the sending and waiting for downlink
-// will extend the time between send packets. You have to extract this time
-#define SLEEP_INTERVAL 600000
+// Sleep interval in seconds (configurable via downlink)
+uint32_t sleepIntervalSeconds = DEFAULT_SLEEP_INTERVAL_SECONDS;
 
 char outStr[255];
 byte recvStatus = 0;
@@ -98,26 +101,93 @@ const sRFM_pins RFM_pins =
 //  .DIO5 = ,
 };
 
+/**
+ * Load sleep interval from EEPROM
+ */
+void loadSleepInterval() {
+  uint32_t magic;
+  EEPROM.get(EEPROM_MAGIC_ADDR, magic);
+
+  if (magic == EEPROM_MAGIC_VALUE) {
+    // Valid EEPROM data exists
+    EEPROM.get(EEPROM_SLEEP_INTERVAL_ADDR, sleepIntervalSeconds);
+    DEBUG_PRINT("Loaded sleep interval from EEPROM: ");
+    DEBUG_PRINT(sleepIntervalSeconds);
+    DEBUG_PRINTLN(" seconds");
+  } else {
+    // First boot or invalid data, initialize EEPROM
+    DEBUG_PRINTLN("Initializing EEPROM with default values");
+    sleepIntervalSeconds = DEFAULT_SLEEP_INTERVAL_SECONDS;
+    EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
+    EEPROM.put(EEPROM_SLEEP_INTERVAL_ADDR, sleepIntervalSeconds);
+  }
+}
+
+/**
+ * Save sleep interval to EEPROM
+ */
+void saveSleepInterval() {
+  EEPROM.put(EEPROM_SLEEP_INTERVAL_ADDR, sleepIntervalSeconds);
+  DEBUG_PRINT("Saved sleep interval to EEPROM: ");
+  DEBUG_PRINT(sleepIntervalSeconds);
+  DEBUG_PRINTLN(" seconds");
+}
+
+/**
+ * Process downlink message
+ */
+void processDownlink(char *data, uint8_t length) {
+  if (length < 1) return;
+
+  uint8_t command = data[0];
+  DEBUG_PRINT("Received command: 0x");
+  DEBUG_PRINTLN(command, HEX);
+
+  switch (command) {
+    case CMD_SET_SLEEP_INTERVAL:
+      if (length >= 5) {
+        // Extract 32-bit sleep interval (big-endian)
+        uint32_t newInterval = ((uint32_t)data[1] << 24) |
+                               ((uint32_t)data[2] << 16) |
+                               ((uint32_t)data[3] << 8) |
+                               ((uint32_t)data[4]);
+
+        // Validate range: 60 seconds to 24 hours
+        if (newInterval >= 60 && newInterval <= 86400) {
+          sleepIntervalSeconds = newInterval;
+          saveSleepInterval();
+          DEBUG_PRINT("Sleep interval updated to: ");
+          DEBUG_PRINT(sleepIntervalSeconds);
+          DEBUG_PRINTLN(" seconds");
+        } else {
+          DEBUG_PRINT("Invalid sleep interval: ");
+          DEBUG_PRINTLN(newInterval);
+        }
+      }
+      break;
+
+    default:
+      DEBUG_PRINTLN("Unknown command");
+      break;
+  }
+}
+
 void setup()
-{ 
+{
   // Setup serial debug
-  DEBUG_INIT();
+  DEBUG_BEGIN();
   // time for serial settings
-  delay(1000);
-  
+  delay(500);
+  DEBUG_PRINTLN("Setup starting");
+
  /************************************************
- * get TimeCorrection number for RTC times
+ * Load configuration from EEPROM
  ************************************************/
-  // wait 8 seconds to upload new code and
-  // calibrate the RTC times with the HSI internal clock
-  // time calibration on device with correct timing (ideal 8000.00)
-  // incease this time to shorten time between send and receive
-  LowPowerCal.setRTCCalibrationTime(calTimeDivider);
-  // callibrate for 8 seconds
-  LowPowerCal.calibrateRTC();
-  DEBUG_PRINT("RTC Time Correction: ");
-  DEBUG_PRINTLN(LowPowerCal.getRTCTimeCorrection(), 5);
-  
+  loadSleepInterval();
+
+ /************************************************
+ * LoRa init and set default parameters
+ ************************************************/
   if(!lora.init())
   {
     DEBUG_PRINTLN("RFM95 not detected");
@@ -125,55 +195,43 @@ void setup()
     return;
   }
 
-  // Set LoRaWAN Class change CLASS_A or CLASS_C or CLASS_A_NO_RX
-  lora.setDeviceClass(CLASS_A_NO_RX);
-
+  // Set LoRaWAN Class change CLASS_A (needed for downlinks), CLASS_A_NO_RX or CLASS_C
+  lora.setDeviceClass(CLASS_A);
   // Set Data Rate for join!
   lora.setDataRate(SF7BW125);
-
   // Set Receive Delay for RX1 window
   lora.setReceiveDelay1(5);
-
   // set channel to random
   lora.setChannel(MULTI);
-
-// Join channels:
-// 868.10 MHz 868.30 MHz 868.50 MHz -> channel 0, 1, 2
-
-
-  // use this setting for power settings lora.setTxPower will use boost pin?
-  // power level between 0 and 16
-  lora.setTxPower1(0);
-
+  // use this setting for power settings
+  // power level between 0 and max 15 (0dBm -> 15 dBm)
+  lora.setTxPower1(TX_0dBm);
   // Put OTAA Key and DevAddress here
   lora.setDevEUI(devEui);
   lora.setAppEUI(appEui);
   lora.setAppKey(appKey);
-  
-  // set framecounter for first packet to 1
-  lora.setFrameCounter(1);
 
-  // Join procedure
-  // https://lora-developers.semtech.com/documentation/tech-papers-and-guides/the-book/joining-and-rejoining
-  
+ /************************************************
+ * LoRa Start Join Process - calibration happens during join
+ ************************************************/
   bool isJoined = false;
   do
   {
     DEBUG_PRINTLN("Joining...");
     isJoined = lora.join();
-    // faster 
+    // faster
     if (isJoined) break;
-    
+
     //wait for 15s to try again
     lora.sleepLowPower();
-    LowPower.begin();
-    LowPower.deepSleep(RETRY_DELAY_MS);
+    LowPowerCal.begin();
+    LowPowerCal.deepSleep(RETRY_DELAY_MS, 0);
 
   }while(!isJoined);
   DEBUG_PRINTLN("Joined to network");
 
-  // set dataRate for sending data instead of defaults
-  lora.setDataRate(SF7BW125);
+  DEBUG_PRINT("Time Correction: ");
+  DEBUG_PRINTLN(LowPowerCal.getTimeCorrectionFactor(), 5);
 
   // Start up the ds18b20 library
   sensors.begin();
@@ -189,17 +247,24 @@ void setup()
 
 void loop()
 {
-  // Prepare upstream data transmission at the next possible time.
+ /************************************************
+ * Set data ready for sending with LoRa
+ * Payload format:
+ * Byte 0-1: VCC (mV)
+ * Byte 2-3: Temperature (°C × 100 + 5000)
+ * Byte 4-7: Current sleep interval (seconds)
+ ************************************************/
   uint8_t dataLength = 8;
   char data[dataLength];
 
+  int dataIndex = 0;
+
   // read vcc and add to bytebuffer
   int32_t vcc = IntRef.readVref();
-  data[0] = (vcc >> 8) & 0xff;
-  data[1] = (vcc & 0xff);
+  data[dataIndex++] = (vcc >> 8) & 0xff;
+  data[dataIndex++] = (vcc & 0xff);
 
   // reading data from ds18b20
-  //sensors.requestTemperatures();
   sensors.requestTemperatures();
   float tempFloat = sensors.getTempCByIndex(0);
 
@@ -209,28 +274,43 @@ void loop()
     tempFloat = 999;
     return;
   }
-  tempFloat = tempFloat + TEMP_OFFSET;    //Using 50degre offset to handle negative values. Should be subtracted in payload decoder
+  tempFloat = tempFloat + TEMP_OFFSET;    //Using 50 degree offset to handle negative values. Should be subtracted in payload decoder
 
   // from float to uint16_t
-  uint16_t tempInt = (100 * tempFloat);  
+  uint16_t tempInt = (100 * tempFloat);
 
+  // move temperature data into bytebuffer
+  data[dataIndex++] = (tempInt >> 8) & 0xff;
+  data[dataIndex++] = tempInt & 0xff;
 
-  // move BME data into bytebuffer
-  data[2] = (tempInt >> 8) & 0xff;
-  data[3] = tempInt & 0xff;
+  // add current sleep interval (32-bit, big-endian)
+  data[dataIndex++] = (sleepIntervalSeconds >> 24) & 0xff;
+  data[dataIndex++] = (sleepIntervalSeconds >> 16) & 0xff;
+  data[dataIndex++] = (sleepIntervalSeconds >> 8) & 0xff;
+  data[dataIndex++] = sleepIntervalSeconds & 0xff;
+
+  DEBUG_PRINT("Frame Counter: ");
+  DEBUG_PRINTLN(lora.getFrameCounter());
+  DEBUG_PRINT("Sleep Interval: ");
+  DEBUG_PRINT(sleepIntervalSeconds);
+  DEBUG_PRINTLN(" seconds");
 
   // unconfirmed data (0), port (1)
-  lora.setUplinkData(data, strlen(data), 0, 1);
+  lora.setUplinkData(data, dataIndex, 0, 1);
 
-
-  
+ /************************************************
+ * LoRa Send data and wait for received data
+ ************************************************/
   // cycle -> send (if new message available) and wait for response in RX1 and RX2
   lora.cycle();
 
+ /************************************************
+ * Check if data is received and print
+ ************************************************/
   recvStatus = lora.readData(outStr);
   if(recvStatus)
   {
-    DEBUG_PRINTLN(outStr);
+    DEBUG_PRINT("Received downlink: ");
     int i = 0;
     while(outStr[i] != '\0' && i < sizeof(outStr))
     {
@@ -239,17 +319,21 @@ void loop()
         i++;
     }
     DEBUG_PRINTLN();
+
+    // Process downlink command
+    processDownlink(outStr, recvStatus);
   }
 
-  DEBUG_PRINTLN("Going to long sleep");
+ /************************************************
+ * Power down and going to long sleep
+ ************************************************/
+  DEBUG_PRINT("Going to sleep for ");
+  DEBUG_PRINT(sleepIntervalSeconds);
+  DEBUG_PRINTLN(" seconds");
+
   lora.sleepLowPower();
-  
-  LowPower.begin();
-  delay(100);
-
-
-  LowPower.deepSleep(SLEEP_INTERVAL_US);
-  
+  LowPowerCal.begin();
+  LowPowerCal.deepSleep(sleepIntervalSeconds * 1000, 0);  // Convert to milliseconds
 }
 
 

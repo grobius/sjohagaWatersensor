@@ -1,6 +1,6 @@
 /*
     renamed to LoRaWAN.cpp
-    Updated by Leo korbee | 2022
+    Updated/improved by Leo korbee | 2025
 
 */
 
@@ -37,7 +37,7 @@
 
 #include "LoRaWAN.h"
 #include "Conversions.h"
-#include "STM32LowPowerCal.h"
+#include "../STM32LowPowerCal/STM32LowPowerCal.h"
 
 // constructor
 LoRaWANClass::LoRaWANClass()
@@ -106,6 +106,7 @@ bool LoRaWANClass::init(void)
     memset(NwkSKey, 0x00, 16);
     memset(AppSKey, 0x00, 16);
 
+    // alway start with framcounter = 1
     Frame_Counter_Tx = 0x0001;
 
     Session_Data.NwkSKey = NwkSKey;
@@ -182,6 +183,8 @@ bool LoRaWANClass::join(void)
     //int Join_Accept_Delay_1 = round(JOIN_ACCEPT_DELAY1 * 1000 * LoRa_Settings.Time_Correction);
     int Join_Accept_Delay_1 = JOIN_ACCEPT_DELAY1 * 1000;
 
+    // timeout of 6 seconds, then you should have received data 
+    unsigned int timeout = Join_Accept_Delay_1 + 1000;
     unsigned long prev_millis;
 
     if (currentChannel == MULTI)
@@ -195,22 +198,33 @@ bool LoRaWANClass::join(void)
 
     // join request
     LoRa_Send_JoinReq(&OTAA_Data, &LoRa_Settings);
-    //prev_millis = millis();
+    prev_millis = millis();
     // set RFM95 module to low power
-    this->sleepLowPower();
-    LowPowerCal.begin();
+    // this->sleepLowPower();
+    // LowPowerCal.begin();
     // 40 ms = 26.8 go to sleep RFM + 11.3 wakeup RFM + 40 ms extra -> time should be about 5920-5930
-    LowPowerCal.deepSleep(Join_Accept_Delay_1, 80); 
+    // LowPowerCal.deepSleep(Join_Accept_Delay_1, 80); 
     
     // delay to reduce power during waiting
     // delay(timeout-1000);
     // loop for <timeout> wait for join accept
-    // do
-    // {
-        join_status = LORA_join_Accept(&Buffer_Rx, &Session_Data, &OTAA_Data, &Message_Control, &LoRa_Settings);
-    // }
-    // while ((millis() - prev_millis) < timeout && !join_status);
+    // normal 50, when debugging 100
+    delay(Join_Accept_Delay_1 - 50);
 
+    do
+    {
+        join_status = LORA_join_Accept(&Buffer_Rx, &Session_Data, &OTAA_Data, &Message_Control, &LoRa_Settings);   
+    }
+    while (((millis() - prev_millis) < timeout) && !join_status);
+    // with time correction between airtime and processing signal
+    unsigned int joinmillis = millis() - prev_millis - 180;
+    
+    
+    DEBUG_PRINT("joinmillis: ");
+    DEBUG_PRINTLN(joinmillis);
+    // put the correction factor in the LowPowerCal
+    LowPowerCal.setTimeCorrectionFactor((float) Join_Accept_Delay_1/joinmillis);
+    
     return join_status;
 }
 
@@ -578,12 +592,12 @@ void LoRaWANClass::randomChannel()
     LoRa_Settings.Channel_Tx = freq_idx;
 }
 
-unsigned int LoRaWANClass::getFrameCounter() 
+uint32_t LoRaWANClass::getFrameCounter() 
 {
     return Frame_Counter_Tx;
 }
 
-void LoRaWANClass::setFrameCounter(unsigned int FrameCounter) 
+void LoRaWANClass::setFrameCounter(uint32_t FrameCounter) 
 {
     Frame_Counter_Tx = FrameCounter;
 }
