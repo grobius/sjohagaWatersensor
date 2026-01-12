@@ -36,8 +36,9 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// Data wire is plugged into port PA5 on the MiniPill
-#define ONE_WIRE_BUS PA1
+// DS18B20 pin definitions
+#define ONE_WIRE_BUS PA1        // Data line (DQ)
+#define DS18B20_POWER_PIN PA0   // GPIO to power the sensor (VDD)
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -233,15 +234,25 @@ void setup()
   DEBUG_PRINT("Time Correction: ");
   DEBUG_PRINTLN(LowPowerCal.getTimeCorrectionFactor(), 5);
 
+ /************************************************
+ * Setup DS18B20 with GPIO power control
+ ************************************************/
+  // Configure DS18B20 power pin
+  pinMode(DS18B20_POWER_PIN, OUTPUT);
+  digitalWrite(DS18B20_POWER_PIN, LOW);  // Start with sensor OFF
+
+  // Power on sensor to initialize
+  digitalWrite(DS18B20_POWER_PIN, HIGH);
+  delay(50);  // Wait for sensor to stabilize
+
   // Start up the ds18b20 library
   sensors.begin();
-  sensors.setResolution(10);
-  delay(1000);
-  // if (!sensors.getAddress(insideThermometer, 0)) Serial.println("Unable to find address for Device 0");
+  sensors.setResolution(10);  // 10-bit resolution = 0.25°C precision
+  delay(100);  // Wait for configuration
 
-  // sensors.setResolution(insideThermometer, 9);
-
-
+  // Power off sensor until needed
+  digitalWrite(DS18B20_POWER_PIN, LOW);
+  DEBUG_PRINTLN("DS18B20 initialized with GPIO power control");
 
 }
 
@@ -264,9 +275,16 @@ void loop()
   data[dataIndex++] = (vcc >> 8) & 0xff;
   data[dataIndex++] = (vcc & 0xff);
 
+  // Power on DS18B20 sensor
+  digitalWrite(DS18B20_POWER_PIN, HIGH);
+  delay(50);  // Wait for sensor to stabilize
+
   // reading data from ds18b20
   sensors.requestTemperatures();
   float tempFloat = sensors.getTempCByIndex(0);
+
+  // Power off DS18B20 to save energy
+  digitalWrite(DS18B20_POWER_PIN, LOW);
 
   if (tempFloat == DEVICE_DISCONNECTED_C)
   {
@@ -347,19 +365,27 @@ void printAddress(DeviceAddress deviceAddress)
   }
 }
 
-/* MiniPill LoRa v1.x mapping - LoRa module RFM95W and BME280 sensor
-  PA1  //            NSS           - BME280
-  PA4  // SPI1_NSS   NSS  - RFM95W
-  PA5  // SPI1_SCK   SCK  - RFM95W - BME280
-  PA6  // SPI1_MISO  MISO - RFM95W - BME280
-  PA7  // SPI1_MOSI  MOSI - RFM95W - BME280
+/* MiniPill LoRa pin mapping - RFM95W LoRa module and DS18B20 sensor
 
+  RFM95W LoRa Module:
+  PA4  // SPI1_NSS   NSS  - RFM95W
+  PA5  // SPI1_SCK   SCK  - RFM95W
+  PA6  // SPI1_MISO  MISO - RFM95W
+  PA7  // SPI1_MOSI  MOSI - RFM95W
+  PA9  // USART1_TX  RST  - RFM95W
   PA10 // USART1_RX  DIO0 - RFM95W
   PB4  //            DIO1 - RFM95W
   PB5  //            DIO2 - RFM95W
 
-  PA9  // USART1_TX  RST  - RFM95W
+  DS18B20 Temperature Sensor (GPIO-controlled power):
+  PA0  //            VDD  - DS18B20 (power control)
+  PA1  //            DQ   - DS18B20 (data with 4.7kΩ pullup to PA0)
+  GND  //            GND  - DS18B20
 
+  Debug Serial (optional):
+  PA2  // USART2_TX  TX   - Debug output (115200 baud)
+
+  Power:
   VCC - 3V3
   GND - GND
 */
