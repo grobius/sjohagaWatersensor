@@ -19,11 +19,10 @@
 //const double calTimeDivider =  7980.0;
 
 // OTAA credentials TTN05 production
-const char *appEui = "0000000000000000"; 
-const char *devEui = "70B3D57ED00689A7";
-const char *appKey = "A9CA84DF680AE3B21643E0ED8FD316CF";
-// incease this time to shorten time between send and receive
-const double calTimeDivider =  7910.0;
+const char *appEui = "0000000000000000";
+const char *devEui = "70B3D57ED0075250";
+const char *appKey = "8B1D0C55A7E08174BFAD58C37DD19C44";
+// Note: calTimeDivider removed - PSLL v2.1 does automatic RTC calibration during join
 
 // OTAA credentials TTN12 production
 // const char *appEui = "696F742D6C6162FF"; 

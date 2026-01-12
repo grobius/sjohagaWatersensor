@@ -50,22 +50,24 @@ RFM95W Module:
   PB5  - DIO2
 
 DS18B20 Sensor (GPIO-controlled power):
-  PA0  - VDD (power control via GPIO)
-  PA1  - DQ (data line with 4.7kΩ pullup to PA0)
+  PA3  - VDD (power control via GPIO)
+  PA1  - DQ (data line with 4.7kΩ pullup to PA3)
   GND  - GND
 
 Debug Serial (optional):
   PA2  - TX (115200 baud)
 ```
 
-**Important**: The DS18B20 uses GPIO-controlled power (PA0) for ultra-low power operation. The 4.7kΩ pullup resistor should be connected between PA1 (data) and PA0 (power), NOT to 3.3V. This ensures zero power consumption when the sensor is off.
+**Important**: The DS18B20 uses GPIO-controlled power (PA3) for ultra-low power operation. The 4.7kΩ pullup resistor should be connected between PA1 (data) and PA3 (power), NOT to 3.3V. This ensures zero power consumption when the sensor is off.
+
+**Note**: PA3 was chosen instead of PA0 to avoid conflict with the PSLL library's analog randomization routine which uses PA0 for DevNonce generation.
 
 ### DS18B20 Wiring Diagram
 
 ```
 STM32L051                          DS18B20
                                    (TO-92)
-   PA0 (GPIO) ────┬──────────────── Pin 3 (VDD)
+   PA3 (GPIO) ────┬──────────────── Pin 3 (VDD)
                   │
                 4.7kΩ (pullup)
                   │
@@ -75,14 +77,14 @@ STM32L051                          DS18B20
 ```
 
 **Why GPIO-controlled power?**
-- **Zero power when sleeping**: PA0 LOW = 0 µA sensor consumption
+- **Zero power when sleeping**: PA3 LOW = 0 µA sensor consumption
 - **99% power savings**: Compared to always-on or parasitic power
 - **Better reliability**: Normal power mode vs parasitic mode
 - **Faster readings**: No capacitor charging delays needed
 
 **Alternative wiring (always-on, not recommended):**
 If you want to use always-on power instead (wastes ~1 µA continuously):
-- Connect DS18B20 VDD to 3.3V (not PA0)
+- Connect DS18B20 VDD to 3.3V (not PA3)
 - Connect 4.7kΩ pullup between PA1 and 3.3V
 - Modify code to remove `digitalWrite(DS18B20_POWER_PIN, ...)` calls
 
@@ -260,7 +262,10 @@ The old library has been backed up to `lib/PSLL_old_backup_20260111/`. Key chang
 - Check LoRaWAN credentials in `config.h`
 - Verify antenna connection
 - Check gateway is in range and operational
-- Enable DEBUG_MAIN for diagnostic output
+- Enable DEBUG_MAIN for diagnostic output from main application
+- Enable DEBUG_LORA in `lib/PSLL/src/LoRaWAN/Config.h` for detailed library diagnostics (DevNonce, join request/accept, MIC validation)
+- **Important**: Ensure PA0 is not used for other purposes - the library uses it for analog randomization
+- Check network server console to see if join requests are being received
 
 ### Downlinks not received
 - Ensure device uses CLASS_A mode (not CLASS_A_NO_RX)
@@ -276,8 +281,8 @@ The old library has been backed up to `lib/PSLL_old_backup_20260111/`. Key chang
 
 ### Sensor reading errors (999 or DEVICE_DISCONNECTED)
 - Verify DS18B20 wiring (see wiring diagram above)
-- Check 4.7kΩ pullup resistor is connected between PA1 and PA0 (NOT 3.3V)
-- Ensure PA0 is configured as output and toggling (enable DEBUG_MAIN)
+- Check 4.7kΩ pullup resistor is connected between PA1 and PA3 (NOT 3.3V)
+- Ensure PA3 is configured as output and toggling (enable DEBUG_MAIN)
 - Try increasing delay after `digitalWrite(DS18B20_POWER_PIN, HIGH)` to 100ms
 - Test with always-on power (connect VDD to 3.3V) to isolate GPIO issue
 - Verify sensor is genuine DS18B20 (many clones have timing issues)
