@@ -2,8 +2,8 @@
 #define ANALOGINPUTFORRANDOMIZING PA0
 
 //Uncomment for debug. DEBUG_MAIN must be defined for Serial port init
-//#define DEBUG_LORA
-//#define DEBUG_LOW_LEVEL
+#define DEBUG_LORA
+#define DEBUG_LOW_LEVEL
 
 #ifdef DEBUG_LORA
   // for debugging redirect to hardware Serial2

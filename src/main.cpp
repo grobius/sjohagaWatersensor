@@ -38,7 +38,7 @@
 
 // DS18B20 pin definitions
 #define ONE_WIRE_BUS PA1        // Data line (DQ)
-#define DS18B20_POWER_PIN PA0   // GPIO to power the sensor (VDD)
+#define DS18B20_POWER_PIN PA3   // GPIO to power the sensor (VDD) - changed from PA0 to avoid conflict with library ANALOGINPUTFORRANDOMIZING
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -50,7 +50,7 @@ DallasTemperature sensors(&oneWire);
 DeviceAddress insideThermometer;
 
 // uncomment for debugging main
-//#define DEBUG_MAIN
+#define DEBUG_MAIN
 
 // Define constants for magic numbers
 #define BAUD_RATE 115200
@@ -378,8 +378,8 @@ void printAddress(DeviceAddress deviceAddress)
   PB5  //            DIO2 - RFM95W
 
   DS18B20 Temperature Sensor (GPIO-controlled power):
-  PA0  //            VDD  - DS18B20 (power control)
-  PA1  //            DQ   - DS18B20 (data with 4.7kΩ pullup to PA0)
+  PA3  //            VDD  - DS18B20 (power control) - changed from PA0 to avoid conflict with ANALOGINPUTFORRANDOMIZING
+  PA1  //            DQ   - DS18B20 (data with 4.7kΩ pullup to PA3)
   GND  //            GND  - DS18B20
 
   Debug Serial (optional):
