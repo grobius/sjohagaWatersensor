@@ -10,6 +10,6 @@
 // OTAA credential - all start with msb
 const char *appEui = "0000000000000123";
 const char *devEui = "1234567890123456";
-const char *appKey = "ABCDEFABCDEFABCDEFABCDEFABCDEFAB";
+const char *appKey = "0123456789ABCDEF0123456789ABCDEF";
 // incease this time to shorten time between send and receive, depends on micro-controller
-const double calTime =  7980.0;
+const double calTimeDivider = 7980.0;

@@ -79,7 +79,8 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
     unsigned char rx1_dr = LoRa_Settings->Datarate_Tx+10;
 	#elif defined(EU_868)
 	// save settings for later reset
-    unsigned char rx1_dr = LoRa_Settings->Datarate_Rx;
+    unsigned char rx1_dr = LoRa_Settings->Datarate_Tx > LoRa_Settings->Rx1_DR_Offset
+        ? LoRa_Settings->Datarate_Tx - LoRa_Settings->Rx1_DR_Offset : 0;
 	#endif
 
   	//Transmit
@@ -96,6 +97,8 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 
 		// clear Message_Control and Message_Options before receiving new message:
 		Message_Control->Frame_Control = 0x00;
+		Message_Control->MAC_Header = 0x00;
+		Data_Rx->Counter = 0;
 		// set direction to down for MIC calculations
 		Message_Control->Direction = 0x01;
 
@@ -146,7 +149,8 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 			// Receive Data RX1 usualy for class A device
 			LORA_Receive_Data(Data_Rx, Session_Data, OTAA_Data, Message_Control, LoRa_Settings);
 
-			if (Data_Rx->Counter == 0)
+			// A valid ACK/MAC-only downlink also closes the receive cycle.
+			if (Message_Control->MAC_Header == 0)
 			{
 				DEBUG_PRINTLN("MAC: Sleep RX2");
 				RFM_Mode_Sleep_LowPower();
@@ -169,7 +173,7 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 				//if (Data_Rx->Counter > 0)return;
 
 				//Configure datarate and channel for RX2
-				LoRa_Settings->Channel_Rx = LoRa_Settings->Channel_Rx;   // set RX2 channel
+				LoRa_Settings->Channel_Rx = 0x08;   // EU868 RX2: 869.525 MHz
 				LoRa_Settings->Datarate_Rx = LoRa_Settings->Datarate_Rx2;   //set RX2 datarate
 				//Receive Data RX2
 				//If class A timeout will apply
@@ -347,8 +351,13 @@ void LORA_Send_Data(sBuffer *Data_Tx, sLoRa_Session *Session_Data, sLoRa_Message
 *				*LoRa_Settings pointer to sSetting struct
 *****************************************************************************************
 */
-void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA *OTAA_Data, sLoRa_Message *Message_Control, sSettings *LoRa_Settings)
+void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA *OTAA_Data, sLoRa_Message *receivedMessage, sSettings *LoRa_Settings)
 {
+	// Do not publish ACK, options or port from an unauthenticated packet.
+	sLoRa_Message candidate = {};
+	candidate.Direction = 1;
+	sLoRa_Message *Message_Control = &candidate;
+	Data_Rx->Counter = 0;
 	// remember this takes time to process -> RX1 and RX2 window will be too large!
 	// correct every window with 20 milliseconds!
 	DEBUG_PRINT("MAC: LORA_Received_Data called @ ");
@@ -406,6 +415,12 @@ void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA
 	//if CRC ok breakdown package
 	if(Message_Status == CRC_OK)
 	{
+		// MHDR + FHDR + MIC. The MIC helper has an 8-bit length and adds 16 bytes.
+		if (RFM_Package.Counter < 12 || RFM_Package.Counter > 243) return;
+		const unsigned int optionsEnd = 8 + (RFM_Data[5] & 0x0F);
+		if (optionsEnd > RFM_Package.Counter - 4U) return;
+		if (RFM_Package.Counter - 4U > optionsEnd &&
+		    RFM_Package.Counter - 4U - optionsEnd - 1U > MAX_DOWNLINK_PAYLOAD_SIZE) return;
 		//Get MAC_Header
     	Message_Control->MAC_Header = RFM_Data[0];
 
@@ -418,7 +433,7 @@ void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA
 		// 100x 0x80 Confirmed data up
 		// 101x 0xA0 Confirmed data Down
 
-		if(Message_Control->MAC_Header == 0x40 || Message_Control->MAC_Header == 0x60 || Message_Control->MAC_Header == 0x80 || Message_Control->MAC_Header == 0xA0)
+		if(Message_Control->MAC_Header == 0x60 || Message_Control->MAC_Header == 0xA0)
 		{
 			//Get device address from received data
 			Message_Control->DevAddr[0] = RFM_Data[4];
@@ -530,7 +545,7 @@ void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA
 				else
 				{
 					//Get port field when there is data
-					Message_Control->Frame_Port = RFM_Data[8];
+					Message_Control->Frame_Port = RFM_Data[Data_Location];
 
 					//Calculate the amount of data in the package
 					Data_Rx->Counter = (RFM_Package.Counter - Data_Location -1);
@@ -559,6 +574,7 @@ void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA
 
 					Message_Status = MESSAGE_DONE;
 				}
+				*receivedMessage = candidate;
 			}
 		}
 
@@ -718,8 +734,8 @@ bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *
 	bool joinStatus = false;
 	unsigned char i;
 
-    // Initialise RFM buffer
-	unsigned char RFM_Data[64];
+    //Initialise RFM buffer
+	unsigned char RFM_Data[255];
 	sBuffer RFM_Package = {&RFM_Data[0], 0x00};
 	unsigned char MIC_Check;
 
@@ -734,14 +750,16 @@ bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *
 		Message_Status = RFM_Get_Package(&RFM_Package);
 	}
 
-	// If CRC ok breakdown package
-	if(Message_Status == CRC_OK)
+	//if CRC ok breakdown package
+	if(Message_Status == CRC_OK &&
+	   (RFM_Package.Counter == 17 || RFM_Package.Counter == 33))
 	{
 		// Get MAC_Header
 		Message->MAC_Header = RFM_Data[0];
 
-		// Join Accept message
-		if(Message->MAC_Header == 0x20)
+		//Join Accept message
+		if(Message->MAC_Header == 0x20 &&
+		   (RFM_Package.Counter == 17 || RFM_Package.Counter == 33))
 		{
 			// Copy the data into the data array
 			for(i = 0x00; i < RFM_Package.Counter; i++)
@@ -778,7 +796,18 @@ bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *
 			// Get Key's and data from package when MIC is OK
 			if(Message_Status == MIC_OK)
 			{
-				// Get AppNonce
+				// Apply the network's receive timing and EU868 RX2 data rate.
+				const unsigned char delay1 = Data_Rx->Data[12] & 0x0F;
+				LoRa_Settings->Recieve_Delay1 = delay1 == 0 ? 1 : delay1;
+				LoRa_Settings->Recieve_Delay2 = LoRa_Settings->Recieve_Delay1 + 1;
+#ifdef EU_868
+				const unsigned char offset = (Data_Rx->Data[11] >> 4) & 0x07;
+				const unsigned char rx2Rate = Data_Rx->Data[11] & 0x0F;
+				if (offset > 5 || rx2Rate > 6) return false;
+				LoRa_Settings->Rx1_DR_Offset = offset;
+				LoRa_Settings->Datarate_Rx2 = rx2Rate;
+#endif
+				//Get AppNonce
 				for(i = 0; i< 3; i++)
 					OTAA_Data->AppNonce[i] = Data_Rx->Data[i+1];
 

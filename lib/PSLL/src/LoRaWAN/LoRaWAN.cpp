@@ -89,6 +89,7 @@ bool LoRaWANClass::init(void)
 
     // default settings for Receive_Delay1 and Receive_Delay2
     LoRa_Settings.Recieve_Delay1 = 1;
+    LoRa_Settings.Rx1_DR_Offset = 0;
     LoRa_Settings.Recieve_Delay2 = LoRa_Settings.Recieve_Delay1 + 1;
 
     // DEBUG_PRINT("Setting Tx at init ");
@@ -139,6 +140,7 @@ bool LoRaWANClass::init(void)
     memset(Data_Rx, 0x00, sizeof(Data_Rx));
     Buffer_Rx.Data = Data_Rx;
     Buffer_Rx.Counter = 0x00;
+    memset(&Message_Control, 0, sizeof(Message_Control));
     Message_Control.Direction = 0x01; //Set down direction for Rx message
 
     //Initialize I/O pins
@@ -431,6 +433,19 @@ void LoRaWANClass::setTxPower1(unsigned char power_idx)
     RFM_Write(RFM_REG_PA_CONFIG, RFM_Data);
 }
 
+int LoRaWANClass::readData(uint8_t *outBuff, size_t capacity, uint8_t &port)
+{
+    port = 0;
+    if (Rx_Status != NEW_RX) return 0;
+    const size_t length = Buffer_Rx.Counter;
+    port = Message_Control.Frame_Port;
+    Buffer_Rx.Counter = 0;
+    Rx_Status = NO_RX;
+    if (outBuff == nullptr || length > capacity) return -1;
+    memcpy(outBuff, Buffer_Rx.Data, length);
+    return int(length);
+}
+
 int LoRaWANClass::readData(char *outBuff)
 {
     int res = 0;
@@ -478,54 +493,44 @@ void LoRaWANClass::cycle(void)
         if ((Message_Control.Frame_Control & 0x20) > 0)
             Ack_Status = NEW_ACK;
 
-        // original length of frame options list
-        unsigned char Frame_Options_Lenght = Message_Control.Frame_Control & 0x0F;
-
-        if (Frame_Options_Lenght > 0)
+        // Build a separate, bounded response. Request bytes are not uplink options.
+        const unsigned char optionsLength = Message_Control.Frame_Control & 0x0F;
+        unsigned char answers[15] = {};
+        unsigned char answerLength = 0;
+        unsigned char cursor = 0;
+        Message_Control.Frame_Control = 0;
+        while (cursor < optionsLength)
         {
-            DEBUG_PRINTLN("LoRaWAN: Frame Options available");
-            // create newoptions array, max 15 octets
-            unsigned char newoptions[15]; 
-
-            // loop through all frame options and create new options...
-            for (int i = 0; i < Frame_Options_Lenght; i++)
+            const unsigned char command = Message_Control.Frame_Options[cursor++];
+            if (command == 0x05) // RXParamSetupReq: dynamic frequencies unsupported
             {
-                switch (Message_Control.Frame_Options[i])
-                {
-                    case 0x05:
-                        DEBUG_PRINTLN("MacCommand 0x05: RXParamSetupReq");
-                        // command
-                        newoptions[i+0] = 0x05;
-                        // All Paramesetup are succesfull: b00000111
-                        newoptions[i+1] = 0x07;
-                        Message_Control.Frame_Control += 2;
-                        break;
-
-                    case 0x06:
-                        DEBUG_PRINTLN("MacCommand 0x06: DevStatusReq");
-                        // command
-                        newoptions[i+0] = 0x06;
-                        // battery level
-                        newoptions[i+1] = 0xFF;
-                        // SNR level
-                        newoptions[i+2] = 0x56;
-                        // add number of bytes to Message.Frame_Control
-                        Message_Control.Frame_Control += 3;
-                        break;	
-                        
-                    default: 
-                        // mac command not found, but printed for debugging
-                        DEBUG_PRINT("MacCommand ");
-                        DEBUG_PRINTLN(Message_Control.Frame_Options[i], HEX);
-                }
+                if (optionsLength - cursor < 4 || answerLength + 2 > sizeof(answers)) break;
+                cursor += 4;
+                answers[answerLength++] = 0x05;
+                answers[answerLength++] = 0x00; // reject; preserve existing parameters
             }
-
-            // put new options into frame options
-            for (int i = 0; i < Frame_Options_Lenght; i++)
+            else if (command == 0x06) // DevStatusReq
             {
-                Message_Control.Frame_Options[i] = newoptions[i];
+                if (answerLength + 3 > sizeof(answers)) break;
+                answers[answerLength++] = 0x06;
+                answers[answerLength++] = 0xFF; // battery level unavailable
+                answers[answerLength++] = 0x00; // neutral link margin
+            }
+            else if (command == 0x08) // RXTimingSetupReq
+            {
+                if (cursor == optionsLength || answerLength == sizeof(answers)) break;
+                const unsigned char delay1 = Message_Control.Frame_Options[cursor++] & 0x0F;
+                setReceiveDelay1(delay1 == 0 ? 1 : delay1);
+                answers[answerLength++] = 0x08;
+            }
+            else
+            {
+                // Unknown command length: stop instead of interpreting its data as CIDs.
+                break;
             }
         }
+        memcpy(Message_Control.Frame_Options, answers, answerLength);
+        Message_Control.Frame_Control = answerLength;
 
         // 101x 0xA0 Confirmed data Down
         if (Message_Control.MAC_Header == 0xA0)
