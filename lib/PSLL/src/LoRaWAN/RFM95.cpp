@@ -763,7 +763,7 @@ message_t RFM_Get_Package(sBuffer *RFM_Rx_Package)
   unsigned char i;
   unsigned char RFM_Interrupts = 0x00;
   unsigned char RFM_Package_Location = 0x00;
-  message_t Message_Status;
+  message_t Message_Status = NO_MESSAGE;
 
   //Get interrupt register
   RFM_Interrupts = RFM_Read(0x12);

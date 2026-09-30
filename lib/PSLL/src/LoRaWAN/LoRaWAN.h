@@ -65,6 +65,9 @@ class LoRaWANClass
         void setTxPower(int level,txPin_t pinTx);
         int getRssi();
         int readData(char *outBuff);
+        // Binary receive: returns length, or -1 if the buffer is too small.
+        // Always consumes the pending message; never appends a terminator.
+        int readData(uint8_t *outBuff, size_t capacity, uint8_t &port);
         bool readAck(void);
         void cycle(void);
 
