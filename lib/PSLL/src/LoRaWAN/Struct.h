@@ -96,6 +96,7 @@ typedef struct {
     unsigned char Datarate_Tx;		//See RFM file
     unsigned char Datarate_Rx;		//See RFM file
     unsigned char Datarate_Rx2;     //Second Window can have different datarate
+    unsigned char Rx1_DR_Offset;    // EU868 offset supplied by join accept
     unsigned char Channel_Tx;		//See RFM file
     unsigned char Channel_Rx;		//See RFM file
     unsigned char Channel_Hopping;	//0x00 No hopping, 0x01 Hopping
