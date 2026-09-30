@@ -38,8 +38,7 @@
 #include "Struct.h"
 #include "Config.h"
 #include <Arduino.h>
-#include "STM32LowPowerCal.h"
-
+#include "../STM32LowPowerCal/STM32LowPowerCal.h"
 /*
  GLOBAL VARIABLES
 */
@@ -125,6 +124,7 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 			RFM_Mode_Sleep_LowPower();
 			LowPowerCal.begin();
 			// sleep 
+			// changed from 80 to 120 when debug is on -> to be tested
 			LowPowerCal.deepSleep(Receive_Delay_1, 80);
 			DEBUG_PRINTLN("MAC: Wakeup");
 
@@ -227,7 +227,7 @@ void LORA_Send_Data(sBuffer *Data_Tx, sLoRa_Session *Session_Data, sLoRa_Message
 	//Set up direction
 	Message_Control->Direction = 0x00;
 
-	//Load the frame counter from the session data into the message
+	//Load the 32 bits of the frame counter from the session data into the message control
 	Message_Control->Frame_Counter = *Session_Data->Frame_Counter;
 
 	//Set confirmation
@@ -312,15 +312,15 @@ void LORA_Send_Data(sBuffer *Data_Tx, sLoRa_Session *Session_Data, sLoRa_Message
 	DEBUG_PRINT("MAC: RFM_Send_Package called @ ");
 	DEBUG_PRINTLN(millis());
 
-	//Raise Frame counter (unsigned int = 32 bits!.., however only 16 bits are send!)
-	if(*Session_Data->Frame_Counter != 0xFFFF)
+	// Raise Frame counter (uint32_t = 32 bits!.., however only 16 bits are send!)
+	if(*Session_Data->Frame_Counter != 0xFFFFFFFF)
 	{
-  	 //Raise frame counter
+  	 // Raise frame counter
 	   *Session_Data->Frame_Counter = *Session_Data->Frame_Counter + 1;
 	}
 	else
 	{
-	   *Session_Data->Frame_Counter = 0x0001;
+	   *Session_Data->Frame_Counter = 0x00000001;
 	}
 
 	//Change channel for next message if hopping is activated
@@ -586,63 +586,79 @@ void LORA_Receive_Data(sBuffer *Data_Rx, sLoRa_Session *Session_Data, sLoRa_OTAA
 }
 /*
 *****************************************************************************************
-* Description : Function that is used to generate device nonce used in the join request function
-*				This is based on a pseudo random function in the arduino library
+* Description : Functions that is used to generate device nonce used in the join request function
+*				This is based on reading RSSI multiple times;
 *
 * Arguments   : *Devnonce pointer to the devnonce arry of withc is unsigned char[2]
 *****************************************************************************************
 */
+
+/* xorshift mix */
+static uint32_t mix32(uint32_t x) 
+{
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  return x;
+}
+
+/* Fallback RSSI entropy collector */
+static uint32_t rssi_entropy_pool(unsigned int samples)
+{
+  uint32_t pool = 0xA5A5A5A5u ^ (uint32_t)millis();
+
+  RFM_Init();
+
+  for (unsigned int i = 0; i < samples; ++i) {
+	//Switch RFM to Single reception
+	RFM_Switch_Mode(RFM_MODE_RXSINGLE);
+	
+    delay(3); /* allow RSSI update */
+
+    uint8_t r = RFM_Get_Rssi(); /* RegRssiValue */
+	
+    uint8_t s = (uint8_t)(r ^ (r << 3));
+    pool ^= ((uint32_t)s << ((i & 3) * 8));
+    pool = pool * 1664525u + 1013904223u;
+    pool = mix32(pool);
+
+    /* mix in micros low bits for jitter if available */
+    pool ^= (uint32_t)(micros() & 0xFFFF);
+    delay(2);
+  }
+
+  pool ^= (uint32_t)millis();
+  pool = mix32(pool);
+  RFM_Switch_Mode(RFM_MODE_STANDBY);
+  return pool;
+}
+
+/* fallback to RSSI mixing */
+void arduino_hal_getRandomBytes(uint8_t *buf, size_t len)
+{
+  size_t off = 0;
+
+  while (off < len) {
+    uint32_t word = 0;
+    word = rssi_entropy_pool(8);
+
+    /* mix in timers */
+    word ^= ((uint32_t)millis() << 16) ^ (uint32_t)(micros() & 0xFFFF);
+    word = mix32(word);
+
+    size_t tocopy = (len - off) < 4 ? (len - off) : 4;
+    for (size_t i = 0; i < tocopy; ++i) {
+      buf[off + i] = (uint8_t)(word & 0xFF);
+      word >>= 8;
+    }
+    off += tocopy;
+  }
+}
+
 static void Generate_DevNonce(unsigned char *DevNonce)
 {
-	// fast RandomNumber generator
-	// orginal idea: https://gist.github.com/bloc97/b55f684d17edd8f50df8e918cbc00f94
-
-	int waitTime = 16;
-	byte lastByte = 0;
-	byte leftStack = 0;
-	byte rightStack = 0;
-
-	// get two bytes randomized with analogRead
-	for (int j = 0; j < 2; j++)
-	{
-  		byte finalByte = 0;
-  
-  		byte lastStack = leftStack ^ rightStack;
-  
-  		for (int i=0; i<4; i++) 
-		{
-    		delayMicroseconds(waitTime);
-    		int leftBits = analogRead(ANALOGINPUTFORRANDOMIZING);
-    		delayMicroseconds(waitTime);
-    		int rightBits = analogRead(ANALOGINPUTFORRANDOMIZING);
-    
-    		finalByte ^= (leftBits << i) | (leftBits >> (8-i));
-
-    		finalByte ^= (rightBits << (7-i)) | (rightBits >> (8-(7-i)));
-    
-    		for (int j=0; j<8; j++) 
-			{
-      			byte leftBit = (leftBits >> j) & 1;
-      			byte rightBit = (rightBits >> j) & 1;
-  
-      			if (leftBit != rightBit) 
-				{
-        			if (lastStack % 2 == 0) 
-					{
-						leftStack = (leftStack << 1) ^ leftBit ^ leftStack;
-        			} 
-					else 
-					{
-						rightStack = (rightStack >> 1) ^ (leftBit << 7) ^ rightStack;
-        			}
-      			}
-   			}
-		}
-  		lastByte ^= (lastByte >> 3) ^ (lastByte << 5) ^ (lastByte >> 4);
-  		lastByte ^= finalByte;
-  
-  		DevNonce[j] = lastByte ^ leftStack ^ rightStack;
-	}
+	// generate by using RSSI measurements
+	arduino_hal_getRandomBytes(DevNonce, 2);
 
 	DEBUG_PRINT("DevNonce: ");
   	DEBUG_PRINT(DevNonce[0], HEX);
@@ -712,8 +728,6 @@ void LoRa_Send_JoinReq(sLoRa_OTAA *OTAA_Data, sSettings *LoRa_Settings)
 	RFM_Send_Package(&RFM_Package, LoRa_Settings);
 }
 
-
-
 bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *OTAA_Data, sLoRa_Message *Message, sSettings *LoRa_Settings)
 {
 
@@ -727,57 +741,59 @@ bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *
 
 	message_t Message_Status = NO_MESSAGE;
 
-	//RFM to single receive
+	// RFM to single receive, check if a messages is received
 	Message_Status = RFM_Single_Receive(LoRa_Settings);
 
-  //If there is a message received get the data from the RFM
-	if(Message_Status == NEW_MESSAGE)
+  	// If there is a message received get the data from the RFM
+	if(Message_Status == NEW_MESSAGE) 
+	{
 		Message_Status = RFM_Get_Package(&RFM_Package);
+	}
 
 	//if CRC ok breakdown package
 	if(Message_Status == CRC_OK &&
 	   (RFM_Package.Counter == 17 || RFM_Package.Counter == 33))
 	{
-		//Get MAC_Header
-    	Message->MAC_Header = RFM_Data[0];
+		// Get MAC_Header
+		Message->MAC_Header = RFM_Data[0];
 
 		//Join Accept message
 		if(Message->MAC_Header == 0x20 &&
 		   (RFM_Package.Counter == 17 || RFM_Package.Counter == 33))
 		{
-			//Copy the data into the data array
+			// Copy the data into the data array
 			for(i = 0x00; i < RFM_Package.Counter; i++)
 				Data_Rx->Data[i] = RFM_Package.Data[i];
 
-			//Set data counter
+			// Set data counter
 			Data_Rx->Counter = RFM_Package.Counter;
 
 			//Decrypt the data
 			for(i = 0x00; i < ((Data_Rx->Counter - 1) / 16); i++)
 				AES_Encrypt(&(Data_Rx->Data[(i*16)+1]),OTAA_Data->AppKey);
 
-			//Calculate MIC
-			//Remove MIC from number of bytes
+			// Calculate MIC
+			// Remove MIC from number of bytes
 			Data_Rx->Counter -= 4;
 
-			//Get MIC
+			// Get MIC
 			Calculate_MIC(Data_Rx, OTAA_Data->AppKey, Message);
 
-			//Clear MIC check counter
+			// Clear MIC check counter
 			MIC_Check = 0x00;
 
-			//Compare MIC
+			// Compare MIC
 			for(i = 0x00; i < 4; i++)
 				if(Data_Rx->Data[Data_Rx->Counter + i] == Message->MIC[i])
 					MIC_Check++;
 
-			//Check if MIC compares
+			// Check if MIC compares
 			if(MIC_Check == 0x04)
 				Message_Status = MIC_OK;
 			else
 				Message_Status = WRONG_MESSAGE;
 
-			//Get Key's and data from package when MIC is OK
+			// Get Key's and data from package when MIC is OK
 			if(Message_Status == MIC_OK)
 			{
 				// Apply the network's receive timing and EU868 RX2 data rate.
@@ -795,100 +811,94 @@ bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *
 				for(i = 0; i< 3; i++)
 					OTAA_Data->AppNonce[i] = Data_Rx->Data[i+1];
 
-				//Get Net ID
+				// Get Net ID
 				for(i = 0; i< 3; i++)
 					OTAA_Data->NetID[i] = Data_Rx->Data[i + 4];
 
-				//Get session Device address
+				// Get session Device address
 				for(i = 0; i< 4; i++)
 					Session_Data->DevAddr[3-i] = Data_Rx->Data[i + 7];
 
-				//Calculate Network Session Key
+				// Calculate Network Session Key
 				Session_Data->NwkSKey[0] = 0x01;
 
-				//Load AppNonce
+				// Load AppNonce
 				for(i = 0; i < 3; i++)
 					Session_Data->NwkSKey[i+1] = OTAA_Data->AppNonce[i];
 
-				//Load NetID
+				// Load NetID
 				for(i = 0; i < 3; i++)
 					Session_Data->NwkSKey[i+4] = OTAA_Data->NetID[i];
 
-				//Load Dev Nonce
+				// Load Dev Nonce
 				Session_Data->NwkSKey[7] = OTAA_Data->DevNonce[0];
 				Session_Data->NwkSKey[8] = OTAA_Data->DevNonce[1];
 
-				//Pad with zeros
+				// Pad with zeros
 				for(i = 9; i <= 15; i++)
 					Session_Data->NwkSKey[i] = 0x00;
 
-				//Copy to AppSkey
-				for(i = 0x00; i < 16; i++)
+				// Copy to AppSkey
+				for(i = 0x00; i < 16; i++) 
 					Session_Data->AppSKey[i] = Session_Data->NwkSKey[i];
 
-				//Change first byte of AppSKey
+				// Change first byte of AppSKey
 				Session_Data->AppSKey[0] = 0x02;
 
-				//Calculate the keys
+				// Calculate the keys
 				AES_Encrypt(Session_Data->NwkSKey,OTAA_Data->AppKey);
 				AES_Encrypt(Session_Data->AppSKey,OTAA_Data->AppKey);
 
-				//Reset Frame counter
-				*Session_Data->Frame_Counter = 0x0000;
+				// Reset Frame counter
+				*Session_Data->Frame_Counter = 0x0001;
 
-
-
-		    	DEBUG_PRINT(F("NwkSKey: "));
-				for(byte i = 0; i < 16 ;++i)
-					DEBUG_PRINT(Session_Data->NwkSKey[i],HEX);
+				DEBUG_PRINT(F("NwkSKey: "));
+				for(byte i = 0; i < 16 ;++i) DEBUG_PRINT(Session_Data->NwkSKey[i],HEX);
 				DEBUG_PRINTLN();
 				DEBUG_PRINT(F("AppSKey: "));
-				for(byte i = 0; i < 16 ;++i)
-					DEBUG_PRINT(Session_Data->AppSKey[i],HEX);
+				for(byte i = 0; i < 16 ;++i) DEBUG_PRINT(Session_Data->AppSKey[i],HEX);
 				DEBUG_PRINTLN();
 
-		// debug DLSettings field
-        DEBUG_PRINTLN("Join DL Settings: ");
-        // DEBUG_PRINT("RFU: (Reserved for Further Use) ");
-        // DEBUG_PRINTLN((Data_Rx->Data[11] & 0x80) >> 7 , HEX);
-        DEBUG_PRINT("RX1DROffset: ");
-        DEBUG_PRINTLN((Data_Rx->Data[11] & 0x70) >> 4 , HEX);
-        DEBUG_PRINT("RX2DataRate: ");
-        DEBUG_PRINTLN(Data_Rx->Data[11] & 0x0F , HEX);
+				// debug DLSettings field
+				DEBUG_PRINTLN("Join DL Settings: ");
+				// DEBUG_PRINT("RFU: (Reserved for Further Use) ");
+				// DEBUG_PRINTLN((Data_Rx->Data[11] & 0x80) >> 7 , HEX);
+				DEBUG_PRINT("RX1DROffset: ");
+				DEBUG_PRINTLN((Data_Rx->Data[11] & 0x70) >> 4 , HEX);
+				DEBUG_PRINT("RX2DataRate: ");
+				DEBUG_PRINTLN(Data_Rx->Data[11] & 0x0F , HEX);
 
+				// debug RXDelay
+				DEBUG_PRINT("RXDelay: ");
+				DEBUG_PRINTLN(Data_Rx->Data[12], HEX);
 
+				/*
+				The RXDelay field sets the downlink RX1 delay and follows the same convention as the Del
+				1523 field in the RXTimingSetupReq command.
+				*/
 
-// debug RXDelay
-        DEBUG_PRINT("RXDelay: ");
-        DEBUG_PRINTLN(Data_Rx->Data[12], HEX);
+				// debug if CLlist (Channel Frequency) is available and size:
+				DEBUG_PRINT("Length of CFList: ");
+				DEBUG_PRINTLN(Data_Rx->Counter-13);
+				// print frequency list
+				DEBUG_PRINTLN("Frequencies in CFList: ");
+				#ifdef DEBUG_LORA
+					if (Data_Rx->Counter-13 > 0)
+					{
+						// number of bytes per frequency = 3
+						for (int i = 13; i < Data_Rx->Counter - 1; i+=3)
+						{
+							unsigned int freq = (Data_Rx->Data[i]) + (Data_Rx->Data[i+1] << 8) + (Data_Rx->Data[i+2] << 16);
+							DEBUG_PRINTLN(freq * 100);
+						}
+					}
+					// The CFListType SHALL be equal to zero (0) to indicate that the CFList contains a list of frequencies.
+					// DEBUG_PRINT("CFListType: (should be 0): ");
+					// DEBUG_PRINTLN(Data_Rx->Data[Data_Rx->Counter-1], HEX);
+				#endif
 
-/*
-  The RXDelay field sets the downlink RX1 delay and follows the same convention as the Del
-  1523 field in the RXTimingSetupReq command.
-*/
-
-// debug if CLlist (Channel Frequency) is available and size:
-        DEBUG_PRINT("Length of CFList: ");
-        DEBUG_PRINTLN(Data_Rx->Counter-13);
-		// print frequency list
-		DEBUG_PRINTLN("Frequencies in CFList: ");
-		#ifdef DEBUG_LORA
-			if (Data_Rx->Counter-13 > 0)
-			{
-				// number of bytes per frequency = 3
-				for (int i = 13; i < Data_Rx->Counter - 1; i+=3)
-				{
-					unsigned int freq = (Data_Rx->Data[i]) + (Data_Rx->Data[i+1] << 8) + (Data_Rx->Data[i+2] << 16);
-					DEBUG_PRINTLN(freq * 100);
-				}
-			}
-			// The CFListType SHALL be equal to zero (0) to indicate that the CFList contains a list of frequencies.
-			// DEBUG_PRINT("CFListType: (should be 0): ");
-			// DEBUG_PRINTLN(Data_Rx->Data[Data_Rx->Counter-1], HEX);
-		#endif
-
-        //Clear Data counter
-        Data_Rx->Counter = 0x00;
+				//Clear Data counter
+				Data_Rx->Counter = 0x00;
 
 				joinStatus = true;
 			}
