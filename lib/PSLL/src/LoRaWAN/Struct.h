@@ -27,6 +27,7 @@
 ****************************************************************************************/
 
 #include "Config.h"
+#include <Arduino.h>
 
 #ifndef STRUCT_H
 #define STRUCT_H
@@ -61,7 +62,7 @@ typedef struct {
     unsigned char *NwkSKey;
     unsigned char *AppSKey;
     unsigned char *DevAddr;
-    unsigned int  *Frame_Counter;
+    uint32_t  *Frame_Counter;
 } sLoRa_Session;
 
 typedef struct {
