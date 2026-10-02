@@ -2,9 +2,8 @@
  * MiniPill LoRa water temperature sensor (STM32L051C8T6 / RFM95W).
  * Based on Leo Korbee's OTAA example and calibrated low-power libraries.
  */
-#include "lorawan.h"
+#include "lorawan.h" // Includes PSLL's STM32LowPowerCal wrapper.
 #include "config.h"
-#include "STM32LowPowerCal.h"
 #include "STM32IntRef.h"
 #include "ReadingInterval.h"
 #include <OneWire.h>
@@ -45,34 +44,48 @@ const sRFM_pins RFM_pins = {
 
 void setup() {
     APP_DEBUG_INIT();
-    // Also leaves an eight-second window for attaching a programmer after reset.
-    LowPowerCal.setRTCCalibrationTime(calTimeDivider);
-    LowPowerCal.calibrateRTC();
+    APP_DEBUG_PRINTLN("Water sensor boot; calibrating RTC for 8 seconds");
+    APP_DEBUG_PRINTLN("Configured DevEUI:");
+    APP_DEBUG_PRINTLN(devEui);
     LowPower.begin();
+    // Measure the actual sleep clock against SysTick, also allowing time to
+    // attach a programmer. Join timing alone cannot measure RTC drift.
+    if (!LowPowerCal.calibrateRTC()) {
+        APP_DEBUG_PRINTLN("RTC calibration failed; using correction factor 1");
+    }
+    APP_DEBUG_PRINTLN("RTC correction factor:");
+    APP_DEBUG_PRINTLN(LowPowerCal.getTimeCorrectionFactor(), 5);
+    APP_DEBUG_PRINTLN("Initializing RFM95");
 
     // Never enter loop() with an uninitialized radio.
     while (!lora.init()) {
         APP_DEBUG_PRINTLN("RFM95 not detected; retrying in 60 seconds");
         APP_DEBUG_FLUSH();
-        LowPower.deepSleep(60000);
+        LowPowerCal.deepSleep(60000, 0);
     }
+    APP_DEBUG_PRINTLN("RFM95 detected");
 
     lora.setDeviceClass(CLASS_A);
     lora.setDataRate(SF7BW125);
     lora.setChannel(MULTI);
-    lora.setTxPower1(0);
+    // Preserve the intended low-power PA_BOOST setting and disable the
+    // high-power PA_DAC mode left by RFM_Init().
+    lora.setTxPower(2, PA_BOOST_PIN);
     lora.setDevEUI(devEui);
     lora.setAppEUI(appEui);
     lora.setAppKey(appKey);
 
     // Back off during network outages instead of attempting a join every 15 s.
     uint32_t retryMs = INITIAL_JOIN_RETRY_MS;
-    while (!lora.join()) {
+    while (true) {
+        APP_DEBUG_PRINTLN("Sending OTAA join request");
+        APP_DEBUG_FLUSH();
+        if (lora.join()) break;
         lora.sleepLowPower();
         APP_DEBUG_PRINTLN("Join failed; sleeping before retry");
         APP_DEBUG_FLUSH();
         const uint32_t jitterMs = uint32_t(random(0, retryMs / 4 + 1));
-        LowPower.deepSleep(retryMs + jitterMs);
+        LowPowerCal.deepSleep(retryMs + jitterMs, 0);
         retryMs = (retryMs < MAX_JOIN_RETRY_MS / 2) ? retryMs * 2 : MAX_JOIN_RETRY_MS;
     }
     APP_DEBUG_PRINTLN("Joined to network");
@@ -119,5 +132,5 @@ void loop() {
     lora.sleepLowPower();
     APP_DEBUG_FLUSH();
     // STM32LowPower takes milliseconds. Measurement and radio time are additional.
-    LowPower.deepSleep(readingIntervalSeconds * 1000UL);
+    LowPowerCal.deepSleep(uint32_t(readingIntervalSeconds * 1000UL), 0);
 }

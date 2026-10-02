@@ -1,9 +1,10 @@
 // used in LoRaMAC.cpp for randomizing and create DevNonce
 #define ANALOGINPUTFORRANDOMIZING PA0
 
-//Uncomment for debug. DEBUG_MAIN must be defined for Serial port init
-#define DEBUG_LORA
-#define DEBUG_LOW_LEVEL
+// Uncomment for radio diagnostics; also enable DEBUG_MAIN in src/main.cpp.
+// Leave disabled for normal battery-powered operation.
+//#define DEBUG_LORA
+//#define DEBUG_LOW_LEVEL
 
 #ifdef DEBUG_LORA
   // for debugging redirect to hardware Serial2

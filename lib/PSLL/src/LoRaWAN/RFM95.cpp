@@ -611,7 +611,7 @@ void RFM_Set_OCP(uint8_t mA)
 *****************************************************************************************
 */
 
-void RFM_Send_Package(sBuffer *RFM_Tx_Package, sSettings *LoRa_Settings)
+bool RFM_Send_Package(sBuffer *RFM_Tx_Package, sSettings *LoRa_Settings)
 {
   unsigned char i;
   unsigned char RFM_Tx_Location = 0x00;
@@ -650,13 +650,23 @@ void RFM_Send_Package(sBuffer *RFM_Tx_Package, sSettings *LoRa_Settings)
   }
 
   //Switch RFM to Tx
+  RFM_Write(RFM_REG_IRQ_FLAGS, 0xFF);
   RFM_Write(RFM_REG_OP_MODE,0x83);
 
-  //Wait for TxDone
-  while(digitalRead(RFM_pins.DIO0) == LOW);
+  // A missing DIO0 signal must not leave the node awake forever. This upper
+  // bound also allows long SF12 frames supported by this library.
+  const uint32_t started = millis();
+  while(digitalRead(RFM_pins.DIO0) == LOW) {
+    if (uint32_t(millis() - started) >= 15000UL) {
+      RFM_Switch_Mode(RFM_MODE_STANDBY);
+      RFM_Write(RFM_REG_IRQ_FLAGS, 0xFF);
+      return false;
+    }
+  }
 
   //Clear interrupt
   RFM_Write(RFM_REG_IRQ_FLAGS,0x08);
+  return true;
 }
 
 /*
@@ -690,13 +700,19 @@ message_t RFM_Single_Receive(sSettings *LoRa_Settings)
   RFM_Change_Channel(LoRa_Settings->Channel_Rx);
 
   //Switch RFM to Single reception
+  RFM_Write(RFM_REG_IRQ_FLAGS, 0xFF);
   RFM_Switch_Mode(RFM_MODE_RXSINGLE);
 
   //Wait until RxDone or Timeout
   //Wait until timeout or RxDone interrupt
+  const uint32_t started = millis();
   while((digitalRead(RFM_pins.DIO0) == LOW) && (digitalRead(RFM_pins.DIO1) == LOW))
   {
-     // DEBUG_PRINT(".");
+    if (uint32_t(millis() - started) >= 15000UL) {
+      RFM_Switch_Mode(RFM_MODE_STANDBY);
+      RFM_Write(RFM_REG_IRQ_FLAGS, 0xFF);
+      return TIMEOUT;
+    }
   }
   DEBUG_PRINTLN("\nRFM95 Wait RxDone int or Timeout");
 

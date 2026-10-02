@@ -72,7 +72,10 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 	int Receive_Delay_1 = LoRa_Settings->Recieve_Delay1 * 1000;
 	int Receive_Delay_2 = LoRa_Settings->Recieve_Delay2 * 1000;
 
-	unsigned long prevTime = 0;
+	uint32_t txRtcMs = 0;
+	// At SF7/125 kHz the 64-symbol timeout lasts about 66 ms. Starting
+	// 20 ms early overlaps the scheduled downlink; 80 ms can miss it entirely.
+	const uint32_t receiveLeadMs = 20;
 	// save settings for later reset
 	unsigned char rx1_ch = LoRa_Settings->Channel_Rx;
 	#ifdef US_915
@@ -93,7 +96,7 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 		//Lora send data
     	LORA_Send_Data(Data_Tx, Session_Data, Message_Control, LoRa_Settings);
 		// reset time after sending data -> this is the RX1 time window
-		prevTime = millis();
+		txRtcMs = LowPowerCal.rtcMillis();
 
 		// clear Message_Control and Message_Options before receiving new message:
 		Message_Control->Frame_Control = 0x00;
@@ -123,9 +126,8 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 			DEBUG_PRINTLN("MAC: Sleep RX1");
 			RFM_Mode_Sleep_LowPower();
 			LowPowerCal.begin();
-			// sleep 
-			// changed from 80 to 120 when debug is on -> to be tested
-			LowPowerCal.deepSleep(Receive_Delay_1, 80);
+			// Wake shortly before RX1 using the measured RTC correction.
+			LowPowerCal.sleepUntil(txRtcMs, Receive_Delay_1, receiveLeadMs);
 			DEBUG_PRINTLN("MAC: Wakeup");
 
 			//Wait rx1 window delay
@@ -155,8 +157,8 @@ void LORA_Cycle(sBuffer *Data_Tx, sBuffer *Data_Rx, RFM_command_t *RFM_Command, 
 				DEBUG_PRINTLN("MAC: Sleep RX2");
 				RFM_Mode_Sleep_LowPower();
 				LowPowerCal.begin();
-				// 100 ms extra for time spend on RX1 when not receiving data on RX1!
-				LowPowerCal.deepSleep(Receive_Delay_2 - Receive_Delay_1, 100); 
+				// Schedule RX2 from TX completion, including time already spent in RX1.
+				LowPowerCal.sleepUntil(txRtcMs, Receive_Delay_2, receiveLeadMs);
 				DEBUG_PRINTLN("MAC: Wakeup");
 
 				// Wait rx2 window delay
@@ -607,7 +609,9 @@ static uint32_t rssi_entropy_pool(unsigned int samples)
 {
   uint32_t pool = 0xA5A5A5A5u ^ (uint32_t)millis();
 
-  RFM_Init();
+  // Wake SPI after sleep, but preserve the radio configuration and TX power.
+  // RFM_Init() here used to reset the output to 20 dBm before every join.
+  RFM_Switch_Mode(RFM_MODE_STANDBY);
 
   for (unsigned int i = 0; i < samples; ++i) {
 	//Switch RFM to Single reception
@@ -672,7 +676,7 @@ static void Generate_DevNonce(unsigned char *DevNonce)
 *				*LoRa_Settings pointer to sSetting struct
 *****************************************************************************************
 */
-void LoRa_Send_JoinReq(sLoRa_OTAA *OTAA_Data, sSettings *LoRa_Settings)
+bool LoRa_Send_JoinReq(sLoRa_OTAA *OTAA_Data, sSettings *LoRa_Settings)
 {
 	unsigned char i;
 
@@ -725,7 +729,7 @@ void LoRa_Send_JoinReq(sLoRa_OTAA *OTAA_Data, sSettings *LoRa_Settings)
 	RFM_Package.Counter = 23;
 
 	//Send Package
-	RFM_Send_Package(&RFM_Package, LoRa_Settings);
+	return RFM_Send_Package(&RFM_Package, LoRa_Settings);
 }
 
 bool LORA_join_Accept(sBuffer *Data_Rx,sLoRa_Session *Session_Data, sLoRa_OTAA *OTAA_Data, sLoRa_Message *Message, sSettings *LoRa_Settings)

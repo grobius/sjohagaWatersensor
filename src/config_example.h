@@ -11,5 +11,5 @@
 const char *appEui = "0000000000000123";
 const char *devEui = "1234567890123456";
 const char *appKey = "0123456789ABCDEF0123456789ABCDEF";
-// incease this time to shorten time between send and receive, depends on micro-controller
-const double calTimeDivider = 7980.0;
+// The application measures RTC drift against SysTick during startup.
+// The old calTimeDivider setting is no longer used by the application.

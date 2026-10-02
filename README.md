@@ -5,20 +5,31 @@ Battery-powered DS18B20 water temperature sensor using a MiniPill LoRa
 
 ## Build
 
-Copy `src/config_example.h` to `src/config.h` for a new installation, enter the
-OTAA credentials and set the board-specific `calTimeDivider`. Preserve an existing
+Copy `src/config_example.h` to `src/config.h` for a new installation and enter the
+OTAA credentials. Preserve an existing
 configuration. Build with `pio run -e genericL051C`.
 
-### Current build issue
+### Calibration library
 
-The merged firmware at commit `945d2b4` fails to build with
-`STM32LowPowerCal.h: No such file or directory` (checked 2026-10-02).
-The PSLL update moved that header to `lib/PSLL/src/STM32LowPowerCal/`, while
-`src/main.cpp` still includes it using the old path. The application also calls
-`setRTCCalibrationTime()` and `calibrateRTC()`, which the new library no longer
-provides. The application and library calibration APIs need to be reconciled
-before building and flashing this version. The protocol below describes the
-interval handler present in the source.
+PSLL includes its calibration wrapper through `lorawan.h`; the header lives at
+`lib/PSLL/src/STM32LowPowerCal/STM32LowPowerCal.h`. The application uses that
+public include instead of the former standalone `STM32LowPowerCal.h` path.
+At startup, `LowPowerCal.calibrateRTC()` measures eight seconds of RTC progress
+against the CPU's SysTick clock. The measured factor is used for receive-window
+waits, join retry sleeps and the reading interval. The eight-second measurement
+also leaves time to attach a programmer before low-power operation.
+`lora.join()` preserves this factor: measuring join processing with `millis()`
+alone does not measure RTC drift. An old `calTimeDivider` in `config.h` is unused.
+
+RX1 and RX2 are scheduled from the RTC timestamp at the end of transmission,
+with a 20 ms early-wake margin. RX2 includes time already spent receiving in RX1.
+The former 80 ms lead could expire the approximately 66 ms SF7 receive window
+before a downlink started. Verify reception on hardware, especially if changing
+data rates or operating over a wide temperature range.
+
+Radio logging is disabled by default in `lib/PSLL/src/LoRaWAN/Config.h`. If you
+enable `DEBUG_LORA` or `DEBUG_LOW_LEVEL`, also enable `DEBUG_MAIN` in
+`src/main.cpp` so that `Serial2` is defined and initialized.
 
 ### Keep the local branch current
 
@@ -84,6 +95,27 @@ Enabling the receive windows costs energy compared with the previous
   Inspect scheduling results, gateway events and device serial diagnostics.
 - A reset restores the ten-minute default; the setting is not persistent.
 
+### If no join requests appear
+
+Check that the active `devEui`, `appEui` and `appKey` in `src/config.h` match the
+device selected in TTN. This tracked file can change when pulling another branch.
+Do not post the AppKey in logs or screenshots. A different DevEUI sends requests
+for a different device, so inspect the gateway's live data as well.
+
+Uncomment `DEBUG_MAIN` in `src/main.cpp`, rebuild and flash to see startup
+diagnostics on PA2 (TX), PA3 (RX), at 9600 baud. The log shows the configured
+DevEUI, radio initialization, each join attempt and its result. The AppKey is not
+printed by these application diagnostics. Allow eight seconds after reset for
+startup. After failed joins, retries back off from 15 seconds to one hour plus
+jitter, so there can be a long quiet period.
+
+EU868 join channel selection now chooses directly from channels 0–2. Previously,
+repeatedly reseeding from a stable analog reading could keep selecting a channel
+outside that range and block the first transmission. Nonce generation now wakes
+the radio without reinitializing it, preserving the selected transmit power.
+TX and RX interrupt waits have a 15-second software timeout; a TX timeout makes
+the join attempt fail and return to the application's retry loop.
+
 ## Uplink format
 
 FPort **1**, exactly **four binary bytes**. Both fields use most significant byte first.
@@ -98,6 +130,13 @@ The existing encoding covers −50 to +125 °C. Voltage measures MCU VDD; with a
 regulator, it does not directly measure the battery. Valid temperature readings
 retain the existing wire format. Update a server decoder to handle the new
 failure sentinel before deployment.
+
+Use [tools/ttn-uplink-decoder.js](tools/ttn-uplink-decoder.js) as the JavaScript
+uplink formatter in The Things Stack. It retains `vcc` in volts and `temperature`
+in degrees Celsius, and maps `FFFF` to `temperature: null, sensor_ok: false`.
+For example, `0C D1 FF FF` means 3.281 V and an unavailable temperature, not
+605.35 °C. Check the DS18B20 connection on PA1, its supply and pull-up if this
+persists. Sensor failure does not disable uplinks or downlink processing.
 
 ## Fixes included
 
@@ -137,10 +176,10 @@ These are review findings and proposed follow-up work, not measured battery gain
    conversion and a verified wake timer if the application tolerates it. Confirm
    whether the probe uses an external supply or parasite power before changing
    pull-up/power behavior. See [Analog Devices' resolution comparison](https://www.analog.com/en/resources/design-notes/1wire-protocol-pdf-of-ds18s20-vs-ds18b20-digital-themormeters.html).
-4. **Add radio timeouts and recovery.** `RFM95.cpp` waits indefinitely for DIO
-   transitions during TX and RX. A disconnected or stuck radio can leave the CPU
-   awake forever. Bound these waits, propagate failures and reset/reinitialize
-   the radio. A watchdog is useful only with a plan for feeding it during the
+4. **Extend radio fault recovery.** TX and RX waits now have software timeouts,
+   and failed join transmissions return to the retry loop. Automatic hardware
+   reset/reinitialization after repeated radio failures remains a useful follow-up.
+   A watchdog is useful only with a plan for feeding it during the
    allowed long sleeps; enabling one blindly can cause repeated resets/joins.
 5. **Repair or replace the incomplete LoRaWAN stack before long deployments.**
    The merged library increments a 32-bit TX counter and includes its upper bytes
@@ -158,10 +197,9 @@ These are review findings and proposed follow-up work, not measured battery gain
    if the board supports it. Keep the network channel plan compatible with the
    library's fixed channel table. SF7 and the current TX-power setting need an
    adequate link margin at the actual installation.
-   Also review the power helper: initialization enables high-power PA_DAC,
-   while `setTxPower1(0)` only changes PA_CONFIG. The existing
-   `setTxPower(dBm, PA_BOOST_PIN)` helper configures both PA_DAC and overcurrent
-   protection. Choose its power setting after measuring the link margin.
+   The application now uses `setTxPower(2, PA_BOOST_PIN)` to configure PA_DAC
+   and overcurrent protection as well as output power. Nonce generation preserves
+   this setting. Adjust transmit power only after measuring the link margin.
 7. **Remove credentials from version control.** `src/config.h` is currently
    tracked. If that history has been shared, rotate the exposed keys and move
    credentials into an ignored local file or build secrets. This change does
@@ -177,7 +215,11 @@ commands and unchanged state on rejection. Compile it with any C++14 compiler:
 
 ```sh
 arm-none-eabi-g++ -std=c++14 -Wall -Wextra -Werror -Iinclude -fsyntax-only test/reading_interval_checks.cpp
+arm-none-eabi-g++ -std=c++14 -Wall -Wextra -Werror -Ilib/PSLL/src/STM32LowPowerCal -fsyntax-only test/sleep_timing_checks.cpp
 ```
+
+The sleep timing checks cover fast/slow RTCs, RX1/RX2 deadlines, timestamp
+rollover and avoiding an indefinite sleep when a deadline has already passed.
 
 Before deploying, test on a device and gateway:
 

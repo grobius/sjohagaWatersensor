@@ -20,9 +20,12 @@ class STM32LowPowerCal : public STM32LowPower {
        
         float getTimeCorrectionFactor();
         void setTimeCorrectionFactor(float time_Correction_Factor);
+        bool calibrateRTC(uint32_t sampleMs = 8000);
+        uint32_t rtcMillis();
+        void sleepUntil(uint32_t startRtcMs, uint32_t delayMs, uint32_t leadMs);
 
          // declare timing parameters
-        float time_Correction_Factor;
+        float time_Correction_Factor = 1.0f;
 };
 
 extern STM32LowPowerCal LowPowerCal;

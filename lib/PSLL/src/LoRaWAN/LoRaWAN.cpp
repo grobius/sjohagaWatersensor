@@ -175,6 +175,9 @@ bool LoRaWANClass::init(void)
       return 0;
     }
 
+    // Seed once. Reseeding from a stable ADC reading on every selection repeats
+    // the same channel and can make a rejection loop run forever.
+    randomSeed(analogRead(ANALOGINPUTFORRANDOMIZING) ^ micros());
     return 1;
 }
 
@@ -191,15 +194,18 @@ bool LoRaWANClass::join(void)
 
     if (currentChannel == MULTI)
     {
-        // for join only channel 0, 1, and 2 can be used
-        do
-        {       
-            randomChannel();
-        } while (LoRa_Settings.Channel_Tx > 2);
+        // Select a valid join channel directly; never wait for randomChannel()
+        // to eventually return one of the three default EU868 channels.
+#ifdef EU_868
+        LoRa_Settings.Channel_Tx = random(0, 3);
+        LoRa_Settings.Channel_Rx = LoRa_Settings.Channel_Tx;
+#else
+        randomChannel();
+#endif
     }
 
     // join request
-    LoRa_Send_JoinReq(&OTAA_Data, &LoRa_Settings);
+    if (!LoRa_Send_JoinReq(&OTAA_Data, &LoRa_Settings)) return false;
     prev_millis = millis();
     // set RFM95 module to low power
     // this->sleepLowPower();
@@ -218,14 +224,8 @@ bool LoRaWANClass::join(void)
         join_status = LORA_join_Accept(&Buffer_Rx, &Session_Data, &OTAA_Data, &Message_Control, &LoRa_Settings);   
     }
     while (((millis() - prev_millis) < timeout) && !join_status);
-    // with time correction between airtime and processing signal
-    unsigned int joinmillis = millis() - prev_millis - 180;
-    
-    
-    DEBUG_PRINT("joinmillis: ");
-    DEBUG_PRINTLN(joinmillis);
-    // put the correction factor in the LowPowerCal
-    LowPowerCal.setTimeCorrectionFactor((float) Join_Accept_Delay_1/joinmillis);
+    // Keep the RTC/SysTick calibration measured at startup. Join processing
+    // time measured with millis() cannot measure the RTC's sleep-clock drift.
     
     return join_status;
 }
@@ -581,7 +581,6 @@ void LoRaWANClass::cycle(void)
 
 void LoRaWANClass::randomChannel()
 {
-    randomSeed(analogRead(ANALOGINPUTFORRANDOMIZING));
     unsigned char freq_idx;
 #ifdef AS_923
     freq_idx = random(0,9);
