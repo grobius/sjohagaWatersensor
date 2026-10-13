@@ -6,8 +6,8 @@ Battery-powered DS18B20 water temperature sensor using a MiniPill LoRa
 ## Build
 
 Copy `src/config_example.h` to `src/config.h` for a new installation and enter the
-OTAA credentials. Preserve an existing
-configuration. Build with `pio run -e genericL051C`.
+OTAA credentials. `src/config.h` is ignored by Git, so credentials stay local;
+preserve an existing configuration. Build with `pio run -e genericL051C`.
 
 ### Calibration library
 
@@ -200,10 +200,9 @@ These are review findings and proposed follow-up work, not measured battery gain
    The application now uses `setTxPower(2, PA_BOOST_PIN)` to configure PA_DAC
    and overcurrent protection as well as output power. Nonce generation preserves
    this setting. Adjust transmit power only after measuring the link margin.
-7. **Remove credentials from version control.** `src/config.h` is currently
-   tracked. If that history has been shared, rotate the exposed keys and move
-   credentials into an ignored local file or build secrets. This change does
-   not modify existing credentials or Git history.
+7. **Rotate credentials exposed in Git history.** `src/config.h` is no longer
+   tracked, but earlier commits still contain the AppKeys. If that history has
+   been shared, rotate the exposed keys in the network console and reflash.
 
 ## Validation
 
