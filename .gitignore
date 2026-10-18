@@ -4,5 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 
-# Local device credentials (copy from src/config_example.h)
+# Device credentials (copy devices_example.csv) and generated EEPROM images
+devices.csv
+.provision/
+# Legacy credential header, no longer used by the firmware
 src/config.h

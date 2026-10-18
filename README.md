@@ -1,232 +1,160 @@
 # sjohagaWatersensor
 
 Battery-powered DS18B20 water temperature sensor using a MiniPill LoRa
-(STM32L051C8T6 + RFM95W), EU868 and LoRaWAN OTAA.
+(STM32L051C8T6 + RFM95W), EU868 and LoRaWAN OTAA, Class A.
 
-## Build
+Each cycle the device reads the supply voltage and water temperature, sends one
+uplink, listens in RX1/RX2 for a downlink and deep-sleeps for the reading
+interval (10 minutes by default).
 
-Copy `src/config_example.h` to `src/config.h` for a new installation and enter the
-OTAA credentials. `src/config.h` is ignored by Git, so credentials stay local;
-preserve an existing configuration. Build with `pio run -e genericL051C`.
-
-### Calibration library
-
-PSLL includes its calibration wrapper through `lorawan.h`; the header lives at
-`lib/PSLL/src/STM32LowPowerCal/STM32LowPowerCal.h`. The application uses that
-public include instead of the former standalone `STM32LowPowerCal.h` path.
-At startup, `LowPowerCal.calibrateRTC()` measures eight seconds of RTC progress
-against the CPU's SysTick clock. The measured factor is used for receive-window
-waits, join retry sleeps and the reading interval. The eight-second measurement
-also leaves time to attach a programmer before low-power operation.
-`lora.join()` preserves this factor: measuring join processing with `millis()`
-alone does not measure RTC drift. An old `calTimeDivider` in `config.h` is unused.
-
-RX1 and RX2 are scheduled from the RTC timestamp at the end of transmission,
-with a 20 ms early-wake margin. RX2 includes time already spent receiving in RX1.
-The former 80 ms lead could expire the approximately 66 ms SF7 receive window
-before a downlink started. Verify reception on hardware, especially if changing
-data rates or operating over a wide temperature range.
-
-Radio logging is disabled by default in `lib/PSLL/src/LoRaWAN/Config.h`. If you
-enable `DEBUG_LORA` or `DEBUG_LOW_LEVEL`, also enable `DEBUG_MAIN` in
-`src/main.cpp` so that `Serial2` is defined and initialized.
-
-### Keep the local branch current
-
-Switching to local `main` does not automatically update it from GitHub. Commit
-or stash local changes first, then run:
+## Build and flash
 
 ```sh
-git switch main
-git pull --ff-only origin main
+pio run -e genericL051C            # build
+pio run -e genericL051C -t upload  # flash via ST-Link
 ```
 
-Build successfully and upload the resulting firmware to the sensor after any
-firmware update. Pulling the source alone does not update the device.
+The firmware contains no credentials; the same image runs on every device.
 
-## Adjust the reading interval by downlink
+## Provision a device
 
-Queue a **binary downlink on FPort 2**, containing exactly five bytes:
+Each device's DevEUI, AppEUI/JoinEUI and AppKey are stored in the STM32L0 data
+EEPROM at `0x08080000`, which firmware uploads do not erase. Provision a device
+once, before or after flashing the firmware:
 
-| Bytes | Meaning |
-| --- | --- |
-| 0 | `01`: set reading interval |
-| 1–4 | Unsigned 32-bit interval in **seconds**, most significant byte first |
+1. Copy `devices_example.csv` to `devices.csv` (ignored by Git) and add one row
+   per device with the values from the TTN console.
+2. Connect the ST-Link and run `python tools/provision.py <name>`.
+   `python tools/provision.py --list` shows the available names.
 
-| Interval | Hex payload |
-| --- | --- |
-| 1 minute | `010000003C` |
-| 10 minutes (boot default) | `0100000258` |
-| 30 minutes | `0100000708` |
-| 1 hour | `0100000E10` |
-| 24 hours | `0100015180` |
+The script writes a 76-byte record (magic, version, ASCII-hex keys, CRC-32; see
+`include/DeviceIdentity.h`) to `.provision/<name>.bin` and programs it with
+STM32CubeProgrammer, connecting under reset so that a sleeping MCU is reachable.
+Use `--mode HotPlug` if NRST is not wired to the programmer (attach during the
+eight-second calibration after reset), and `--no-flash` to only build the image.
 
-In The Things Stack, queue a downlink for this device, select FPort **2**,
-and enter the hex payload. An unconfirmed downlink is sufficient; if confirmed,
-its LoRaWAN acknowledgement is sent with the next scheduled uplink.
+At boot the firmware validates the record. If it is blank or corrupt, the device
+does not try to join; it sleeps and checks again every hour. Back up `devices.csv`
+outside the repository; it is the only copy of the keys besides the network console.
 
-The firmware accepts **60–86400 seconds**, inclusive. Incorrect ports, command
-IDs, lengths and out-of-range values leave the current setting unchanged.
-The value controls sleep after each measurement/transmission cycle, so the actual
-time between readings also includes sensor conversion and radio activity.
-The new setting applies to the sleep immediately after reception. It is held in
-RAM and returns to **600 seconds after reset or power loss**. No flash writes are
-performed for configuration changes. There is no application-level response;
-check the next uplink's timing or enable `DEBUG_MAIN` to see the applied setting.
+## Wiring the DS18B20
 
-The device uses **Class A**: it receives queued downlinks after an uplink, so a
-sleeping device cannot be updated immediately. A longer interval also increases
-configuration latency. See [The Things Stack's remote-control guide](https://www.thethingsindustries.com/docs/getting-started/3-try-starter-kit/control-remotely/).
-Enabling the receive windows costs energy compared with the previous
-`CLASS_A_NO_RX` configuration. Measure that cost on the board.
+Use the probe's three wires (normal power, not parasite power). The firmware
+powers the probe from **PB11** only while reading, and reads data on **PB10**:
 
-### If the interval does not change
+```
+ MiniPill                                   DS18B20 probe
+ PB11 (sensor power) ─┬──────────────────── VDD  (usually red)
+                      │
+                   [4.7 kΩ]  pull-up
+                      │
+ PB10 (1-Wire data) ──┴──────────────────── DQ   (usually yellow or white)
 
-- Use **FPort 2** for commands. FPort 1 carries sensor uplinks and is rejected by
-  the interval handler.
-- Select **Bytes** in The Things Stack and enter, for example, `01 00 00 0E 10`
-  for one hour. Queue the command before the next uplink.
-- Verify the flashed firmware includes `ReadingInterval.h` and uses `CLASS_A`.
-  The older firmware uses `CLASS_A_NO_RX` and a fixed sleep interval.
-- Allow the existing interval to elapse for delivery. After successful reception,
-  the following uplink should use the new interval, plus measurement/radio time
-  and RTC clock error.
-- A `ns.down.data.schedule.attempt` event alone does not prove device reception.
-  Inspect scheduling results, gateway events and device serial diagnostics.
-- A reset restores the ten-minute default; the setting is not persistent.
+ GND ────────────────────────────────────── GND  (usually black)
+```
 
-### If no join requests appear
+- Connect the pull-up to **PB11**, not 3V3; otherwise the switched-off probe is
+  powered through its data pin. PB10 and PB11 are adjacent, so the resistor can
+  be soldered across their pads at the board end.
+- Use 4.7 kΩ for cables up to a few metres, 2.2–3.3 kΩ for longer cables or if
+  readings drop out. Optionally fit 100 nF between VDD and GND at the probe.
+- Wire colours vary between manufacturers; check the probe's documentation.
+- Do not use PA13/PA14 (SWD), PA2/PA3 (debug serial) or the radio pins PA4–PA7,
+  PA9, PA10, PB4 and PB5. To use other GPIOs, update `oneWire(...)` and
+  `SENSOR_POWER_PIN` in `src/main.cpp`.
 
-Check that the active `devEui`, `appEui` and `appKey` in `src/config.h` match the
-device selected in TTN. This tracked file can change when pulling another branch.
-Do not post the AppKey in logs or screenshots. A different DevEUI sends requests
-for a different device, so inspect the gateway's live data as well.
+For each reading the firmware drives PB11 high, waits 10 ms, searches the bus,
+sets 10-bit resolution, converts (up to 187.5 ms) and switches PB11 low again.
+Many DS18B20 clones return 85 °C (the power-on value) from the first conversion
+after power-up, so an 85 °C result is converted once more; a second 85 °C is
+reported as a failed reading.
 
-Uncomment `DEBUG_MAIN` in `src/main.cpp`, rebuild and flash to see startup
-diagnostics on PA2 (TX), PA3 (RX), at 9600 baud. The log shows the configured
-DevEUI, radio initialization, each join attempt and its result. The AppKey is not
-printed by these application diagnostics. Allow eight seconds after reset for
-startup. After failed joins, retries back off from 15 seconds to one hour plus
-jitter, so there can be a long quiet period.
-
-EU868 join channel selection now chooses directly from channels 0–2. Previously,
-repeatedly reseeding from a stable analog reading could keep selecting a channel
-outside that range and block the first transmission. Nonce generation now wakes
-the radio without reinitializing it, preserving the selected transmit power.
-TX and RX interrupt waits have a 15-second software timeout; a TX timeout makes
-the join attempt fail and return to the application's retry loop.
+The DS18B20 needs at least 3.0 V and the GPIO drops about 0.1 V, so with a
+battery feeding the MCU directly, readings may fail (`FFFF`) once VCC falls to
+about 3.1 V. To power the probe permanently instead, connect VDD and the pull-up
+to **3V3** and comment out `#define SENSOR_POWER_PIN PB11`.
 
 ## Uplink format
 
-FPort **1**, exactly **four binary bytes**. Both fields use most significant byte first.
+FPort **1**, four bytes, most significant byte first:
 
 | Bytes | Meaning |
 | --- | --- |
 | 0–1 | MCU supply voltage in millivolts |
-| 2–3 | `(temperature_C + 50) * 100`, or `FFFF` for an unavailable/unencodable reading |
+| 2–3 | `(temperature_C + 50) * 100`, or `FFFF` if the reading failed |
 
-Decode temperature as `raw / 100 - 50`; treat `FFFF` as missing data.
-The existing encoding covers −50 to +125 °C. Voltage measures MCU VDD; with a
-regulator, it does not directly measure the battery. Valid temperature readings
-retain the existing wire format. Update a server decoder to handle the new
-failure sentinel before deployment.
+Decode temperature as `raw / 100 - 50` (range −50 to +125 °C). With a regulator,
+the voltage is MCU VDD, not the battery voltage. Use
+[tools/ttn-uplink-decoder.js](tools/ttn-uplink-decoder.js) as the uplink
+formatter in The Things Stack; it returns `vcc` in volts, `temperature` in °C,
+and `temperature: null, sensor_ok: false` for `FFFF`. The device keeps sending
+uplinks and accepting downlinks when the sensor fails.
 
-Use [tools/ttn-uplink-decoder.js](tools/ttn-uplink-decoder.js) as the JavaScript
-uplink formatter in The Things Stack. It retains `vcc` in volts and `temperature`
-in degrees Celsius, and maps `FFFF` to `temperature: null, sensor_ok: false`.
-For example, `0C D1 FF FF` means 3.281 V and an unavailable temperature, not
-605.35 °C. Check the DS18B20 connection on PA1, its supply and pull-up if this
-persists. Sensor failure does not disable uplinks or downlink processing.
+## Set the reading interval by downlink
 
-## Fixes included
+Queue a **binary downlink on FPort 2** with five bytes: `01` followed by the
+interval in seconds as an unsigned 32-bit big-endian value.
 
-- Replaced `strlen()` on the binary uplink with an explicit four-byte length.
-  The previous code could truncate at a zero byte or read beyond the array.
-- Sensor failure now sends `FFFF` and reaches sleep, keeping downlinks available.
-  Previously it returned to `loop()` continuously without sleeping.
-- Failed radio initialization retries after sleep instead of entering the main
-  loop with an uninitialized radio. Failed joins use exponential backoff from
-  15 seconds to one hour, with up to 25% additional jitter.
-- Removed the 100 ms active delay before each long sleep and corrected sleep
-  units in the application comments: `deepSleep()` takes milliseconds.
-- Enabled Class A and added a bounded binary receive API exposing FPort.
-  Corrected FPort extraction when FOpts are present, the EU868 RX2 channel,
-  and use of join-accept RX delay, RX1 data-rate offset and RX2 data rate.
-- Added downlink length checks and kept unauthenticated packet metadata out of
-  the ACK/MAC processing path. A valid ACK-only RX1 packet now skips RX2.
-- Bounded MAC option responses and corrected their lengths. This remains a
-  partial MAC implementation: FOpts DevStatusReq and RXTimingSetupReq are handled;
-  RXParamSetupReq is rejected, and parsing stops at other command IDs. MAC commands
-  carried in FPort 0 are not implemented.
+| Interval | Hex payload |
+| --- | --- |
+| 1 minute | `010000003C` |
+| 10 minutes (default) | `0100000258` |
+| 30 minutes | `0100000708` |
+| 1 hour | `0100000E10` |
+| 24 hours | `0100015180` |
 
-## Further battery and stability improvements
+- Accepted range: **60–86400 seconds**. Anything else is ignored.
+- Class A: the downlink is delivered after the device's next uplink, so it can
+  take up to one current interval to apply.
+- The interval is the sleep time; conversion and radio time come on top.
+- The setting is held in RAM and returns to **600 seconds after a reset**.
+- There is no confirmation uplink; check the timing of the following uplinks or
+  the debug log (`Reading interval updated`).
 
-These are review findings and proposed follow-up work, not measured battery gains.
+## Debugging
 
-1. **Measure sleep current with the debugger disconnected.** Check the regulator,
-   board LEDs, sensor supply, pull-ups and GPIO leakage. At ten-minute intervals,
-   continuous leakage can dominate average current. No schematic or current
-   measurements are included in this repository.
-2. **Use a longer interval when acceptable.** Moving from 10 to 30 minutes reduces
-   measurement/transmission cycles by approximately two-thirds, but leaves sleep
-   current unchanged. Check network airtime limits before using short intervals.
-3. **Sleep during DS18B20 conversion.** The current DallasTemperature call waits
-   with the CPU active. At 10-bit resolution the conversion limit is 187.5 ms;
-   9-bit resolution takes 93.75 ms and gives 0.5 °C steps. Use asynchronous
-   conversion and a verified wake timer if the application tolerates it. Confirm
-   whether the probe uses an external supply or parasite power before changing
-   pull-up/power behavior. See [Analog Devices' resolution comparison](https://www.analog.com/en/resources/design-notes/1wire-protocol-pdf-of-ds18s20-vs-ds18b20-digital-themormeters.html).
-4. **Extend radio fault recovery.** TX and RX waits now have software timeouts,
-   and failed join transmissions return to the retry loop. Automatic hardware
-   reset/reinitialization after repeated radio failures remains a useful follow-up.
-   A watchdog is useful only with a plan for feeding it during the
-   allowed long sleeps; enabling one blindly can cause repeated resets/joins.
-5. **Repair or replace the incomplete LoRaWAN stack before long deployments.**
-   The merged library increments a 32-bit TX counter and includes its upper bytes
-   in the MIC, but `Encrypt_Payload()` still sets the upper counter bytes to zero.
-   Payload encryption therefore needs correction when the counter passes 65535
-   (roughly 455 days at ten-minute intervals, excluding active time). Received
-   counters are reconstructed from only 16 bits, and downlink replay checks are
-   absent. DevNonce generation has no persistent uniqueness tracking. Complete
-   counter handling, replay rejection and durable nonce allocation, or migrate
-   to a maintained stack.
-6. **Verify receive timing and network compatibility on hardware.** The library
-   uses RTC timing corrections, ignores CFList channel updates and does not
-   implement ADR. Verify join-accept handling in both receive windows.
-   Test RX1/RX2 across temperature and supply voltage; consider an LSE crystal
-   if the board supports it. Keep the network channel plan compatible with the
-   library's fixed channel table. SF7 and the current TX-power setting need an
-   adequate link margin at the actual installation.
-   The application now uses `setTxPower(2, PA_BOOST_PIN)` to configure PA_DAC
-   and overcurrent protection as well as output power. Nonce generation preserves
-   this setting. Adjust transmit power only after measuring the link margin.
-7. **Rotate credentials exposed in Git history.** `src/config.h` is no longer
-   tracked, but earlier commits still contain the AppKeys. If that history has
-   been shared, rotate the exposed keys in the network console and reflash.
+Uncomment `#define DEBUG_MAIN` in `src/main.cpp`, rebuild and flash. The log is on
+PA2 (TX) / PA3 (RX) at 9600 baud and shows the RTC correction factor, the DevEUI
+read from EEPROM, radio initialization, join attempts, sensor failures and
+interval changes. Keys are never printed. Comment `DEBUG_MAIN` out again before
+deploying on battery.
 
-## Validation
+Radio-level logging (`DEBUG_LORA`, `DEBUG_LOW_LEVEL` in
+`lib/PSLL/src/LoRaWAN/Config.h`) also requires `DEBUG_MAIN`.
 
-Build: `pio run -e genericL051C`.
+If no join requests appear, check that the device was provisioned with the row
+matching the device in TTN, and look at the gateway's live data. Failed joins back
+off from 15 seconds to one hour (plus jitter), so long quiet periods are normal.
 
-`test/reading_interval_checks.cpp` contains C++14 compile-time checks of the
-actual command parser, including boundary values, binary zero bytes, malformed
-commands and unchanged state on rejection. Compile it with any C++14 compiler:
+## Timing
+
+At boot, `LowPowerCal.calibrateRTC()` measures the internal RTC against SysTick
+for eight seconds (no LSE crystal), and the resulting factor corrects all sleeps:
+RX1/RX2 waits, join retries and the reading interval. RX windows are scheduled
+from the end of transmission with a 20 ms early wake.
+
+## Tests
+
+Compile-time checks for the downlink parser, the EEPROM identity record and the
+sleep timing math:
 
 ```sh
 arm-none-eabi-g++ -std=c++14 -Wall -Wextra -Werror -Iinclude -fsyntax-only test/reading_interval_checks.cpp
+arm-none-eabi-g++ -std=c++14 -Wall -Wextra -Werror -Iinclude -fsyntax-only test/device_identity_checks.cpp
 arm-none-eabi-g++ -std=c++14 -Wall -Wextra -Werror -Ilib/PSLL/src/STM32LowPowerCal -fsyntax-only test/sleep_timing_checks.cpp
 ```
 
-The sleep timing checks cover fast/slow RTCs, RX1/RX2 deadlines, timestamp
-rollover and avoiding an indefinite sleep when a deadline has already passed.
+## Known limitations
 
-Before deploying, test on a device and gateway:
-
-- Receive a 30-minute command in RX1 and in RX2; verify the next sleep duration.
-- Include FOpts in a downlink; check that FPort and payload still decode correctly.
-- Send invalid commands; verify the interval stays unchanged.
-- Disconnect the temperature probe; check the `FFFF` uplink, sleep and downlink access.
-- Reconnect the probe and verify recovery; power-cycle and verify the 10-minute default.
-- Confirm join backoff during a gateway outage and measure sleep/RX/TX current.
-
-Compilation and parser checks cannot establish radio timing or battery life.
+- **LoRaWAN stack:** payload encryption uses only the low 16 bits of the frame
+  counter, so it breaks after 65535 uplinks (about 455 days at 10-minute
+  intervals). Downlink counters are 16-bit with no replay check, DevNonces are not
+  tracked persistently, ADR and CFList are not implemented, and MAC command
+  support is partial. Fix or migrate to a maintained stack before long deployments.
+- **Battery life is unmeasured.** Measure sleep current with the debugger
+  disconnected. The CPU stays awake during the DS18B20 conversion.
+- **No watchdog.** A hang in the radio driver is limited by 15-second TX/RX
+  timeouts, but there is no hardware reset recovery.
+- **Credentials once committed to Git** should be rotated in the network console,
+  then reprovisioned. Consider readout protection (RDP level 1) on deployed
+  devices, since SWD can read the EEPROM.
